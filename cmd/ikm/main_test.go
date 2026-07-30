@@ -629,3 +629,20 @@ func TestReadOnlyCLIGoldenParity(t *testing.T) {
 		}
 	}
 }
+func TestAuthorizedRuntimeCommandRequiresDisposableRootAndAllowlist(t *testing.T) {
+	root := t.TempDir()
+	command := filepath.Join(root, "engine.exe")
+	if _, err := authorizedRuntimeCommand(command, root, nil); err == nil {
+		t.Fatal("expected empty allowlist refusal")
+	}
+	if _, err := authorizedRuntimeCommand(command, "", []string{command}); err == nil {
+		t.Fatal("expected missing disposable root refusal")
+	}
+	got, err := authorizedRuntimeCommand(command, root, []string{command})
+	if err != nil || got != command {
+		t.Fatalf("expected authorized command, got %q, %v", got, err)
+	}
+	if _, err := authorizedRuntimeCommand(filepath.Join(root, "other.exe"), root, []string{command}); err == nil {
+		t.Fatal("expected command outside allowlist refusal")
+	}
+}

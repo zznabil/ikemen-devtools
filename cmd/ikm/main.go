@@ -717,16 +717,18 @@ func runMutationPrepare(kind string, args []string, stdout, stderr io.Writer) in
 
 func runRuntime(args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 || args[0] != "trace" {
-		fmt.Fprintln(stderr, "usage: ikm runtime trace --allow-runtime --workdir <dir> --timeout <duration> --max-stdout <bytes> --max-stderr <bytes> <command> [args...]")
+		fmt.Fprintln(stderr, "usage: ikm runtime trace --allow-runtime --allow-executable <path> --workdir <disposable-dir> --timeout <duration> --max-stdout <bytes> --max-stderr <bytes> <command> [args...]")
 		return 2
 	}
 	fs := flag.NewFlagSet("runtime trace", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	allow := fs.Bool("allow-runtime", false, "authorize runtime execution")
-	workdir := fs.String("workdir", "", "working directory")
+	workdir := fs.String("workdir", "", "disposable working directory")
 	timeout := fs.Duration("timeout", 30*time.Second, "execution timeout")
 	maxOut := fs.Int("max-stdout", trace.DefaultMaxOutputBytes, "stdout budget")
 	maxErr := fs.Int("max-stderr", trace.DefaultMaxOutputBytes, "stderr budget")
+	allowed := multiStringFlag{}
+	fs.Var(&allowed, "allow-executable", "explicitly allow an executable path (repeatable)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -738,22 +740,56 @@ func runRuntime(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "runtime requires positive budgets and a command")
 		return 2
 	}
+	command, err := authorizedRuntimeCommand(fs.Args()[0], *workdir, allowed)
+	if err != nil {
+		fmt.Fprintln(stderr, "policy refusal:", err)
+		return 6
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	result, err := trace.NewService(trace.NewBridge(nil, nil)).Check(ctx, trace.Config{Command: fs.Args()[0], Args: fs.Args()[1:], WorkingDir: *workdir, MaxStdoutBytes: *maxOut, MaxStderrBytes: *maxErr})
+	result, err := trace.NewService(trace.NewBridge(nil, nil)).Check(ctx, trace.Config{Command: command, Args: fs.Args()[1:], WorkingDir: *workdir, MaxStdoutBytes: *maxOut, MaxStderrBytes: *maxErr})
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 7
 	}
 	return writeJSON(stdout, map[string]any{"schemaVersion": contract.SchemaVersion, "operation": "runtime.trace", "result": result})
 }
+
+func authorizedRuntimeCommand(command, workdir string, allowed []string) (string, error) {
+	if strings.TrimSpace(workdir) == "" {
+		return "", errors.New("disposable workdir is required")
+	}
+	root, err := filepath.Abs(filepath.Clean(workdir))
+	if err != nil {
+		return "", errors.New("invalid disposable workdir")
+	}
+	if st, e := os.Stat(root); e != nil || !st.IsDir() {
+		return "", errors.New("invalid disposable workdir")
+	}
+	if len(allowed) == 0 {
+		return "", errors.New("executable allowlist is empty")
+	}
+	abs, err := filepath.Abs(filepath.Clean(command))
+	if err != nil {
+		return "", errors.New("invalid executable")
+	}
+	for _, candidate := range allowed {
+		c, e := filepath.Abs(filepath.Clean(candidate))
+		if e == nil && strings.EqualFold(c, abs) {
+			return abs, nil
+		}
+	}
+	return "", errors.New("executable is not allowed")
+}
 func runRuntimeOracle(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("runtime oracle", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	allow := fs.Bool("allow-runtime", false, "authorize runtime execution")
-	workdir := fs.String("workdir", "", "working directory")
+	workdir := fs.String("workdir", "", "disposable working directory")
 	timeout := fs.Duration("timeout", 30*time.Second, "execution timeout")
 	expectedPath := fs.String("expected", "", "expected JSON snapshot")
+	allowed := multiStringFlag{}
+	fs.Var(&allowed, "allow-executable", "explicitly allow an executable path (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -765,6 +801,11 @@ func runRuntimeOracle(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "runtime oracle requires --expected, positive timeout, and command")
 		return 2
 	}
+	command, err := authorizedRuntimeCommand(fs.Args()[0], *workdir, allowed)
+	if err != nil {
+		fmt.Fprintln(stderr, "policy refusal:", err)
+		return 6
+	}
 	expected, err := os.ReadFile(*expectedPath)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -772,7 +813,7 @@ func runRuntimeOracle(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	cmp, err := oracle.Compare(ctx, oracle.Request{Command: fs.Args()[0], Args: fs.Args()[1:], WorkingDir: *workdir, Timeout: *timeout}, expected, nil)
+	cmp, err := oracle.Compare(ctx, oracle.Request{Command: command, Args: fs.Args()[1:], WorkingDir: *workdir, Timeout: *timeout}, expected, nil)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 7

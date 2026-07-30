@@ -241,12 +241,18 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 	if w.n <= 0 {
 		return len(p), nil
 	}
+	original := len(p)
 	if len(p) > w.n {
 		p = p[:w.n]
 	}
 	n, err := w.w.Write(p)
 	w.n -= n
-	return len(p), err
+	if err != nil {
+		return n, err
+	}
+	// Report the full input as consumed so bounded capture never turns into
+	// an exec.Cmd short-write failure.
+	return original, nil
 }
 
 type Correlation struct {
