@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ikemen-engine/ikemen-devtools/internal/contract"
+	"github.com/ikemen-engine/ikemen-devtools/internal/graph"
 	"github.com/ikemen-engine/ikemen-devtools/internal/semantics"
 	"github.com/ikemen-engine/ikemen-devtools/internal/workspace"
 )
@@ -25,6 +26,16 @@ func TestPaginationStableAndCursor(t *testing.T) {
 	got2, _, _ := paginate(a, Options{Limit: 2, Cursor: p.NextCursor})
 	if len(got2) != 1 || got2[0].Name != "z" {
 		t.Fatalf("unexpected second page: %#v", got2)
+	}
+}
+func TestDisplayPathNeverLeaksAbsoluteWorkspaceRoot(t *testing.T) {
+	root := t.TempDir()
+	inside := filepath.Join(root, "chars", "hero.def")
+	if got := displayPath(root, inside); got != "chars/hero.def" {
+		t.Fatalf("inside path = %q", got)
+	}
+	if got := displayPath(root, filepath.Join(root, "..", "secret.def")); filepath.IsAbs(filepath.FromSlash(got)) || strings.Contains(got, filepath.Base(root)) {
+		t.Fatalf("outside path leaked host information: %q", got)
 	}
 }
 func TestEnvelopeCanonicalFields(t *testing.T) {
@@ -61,6 +72,23 @@ func TestExportFormatsDeterministic(t *testing.T) {
 		y := b.Envelope.Result.(map[string]any)["content"].(string)
 		if x != y || strings.TrimSpace(x) == "" {
 			t.Fatalf("non-deterministic empty %s", kind)
+		}
+	}
+}
+func TestGraphDiagnosticsUseWorkspaceRelativePaths(t *testing.T) {
+	root := t.TempDir()
+	selectPath := filepath.Join(root, "select.def")
+	if err := os.WriteFile(selectPath, []byte("x\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Graph(context.Background(), Options{Root: root, Kind: "dependencies", Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := r.Envelope.Result.(map[string]any)
+	for _, d := range result["diagnostics"].([]graph.Diagnostic) {
+		if filepath.IsAbs(d.Span.Path) {
+			t.Fatalf("absolute graph path leaked: %q", d.Span.Path)
 		}
 	}
 }

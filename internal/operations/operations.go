@@ -34,6 +34,21 @@ type Result struct {
 	Export   []string
 }
 
+func displayPath(root, path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	absRoot, errRoot := filepath.Abs(root)
+	absPath, errPath := filepath.Abs(path)
+	if errRoot == nil && errPath == nil {
+		rel, err := filepath.Rel(absRoot, absPath)
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+			return filepath.ToSlash(rel)
+		}
+	}
+	return filepath.ToSlash(filepath.Base(path))
+}
+
 func entry(root string) string {
 	root = strings.TrimSpace(root)
 	if st, e := os.Stat(root); e == nil && st.IsDir() {
@@ -106,7 +121,7 @@ func envelope(op string, ws workspace.LoadResult, sem semantics.ResolveResult, s
 	ds = append(ds, sem.Diagnostics...)
 	out := make([]contract.Diagnostic, 0, len(ds))
 	for _, d := range ds {
-		out = append(out, contract.Diagnostic{Code: d.Code, Severity: string(d.Severity), Message: d.Message, Path: d.Path, Evidence: map[string]any{"nextChecks": []string{}}})
+		out = append(out, contract.Diagnostic{Code: d.Code, Severity: string(d.Severity), Message: d.Message, Evidence: map[string]any{"nextChecks": []string{}}})
 	}
 	return contract.Envelope{SchemaVersion: contract.SchemaVersion, Operation: op, Tool: "ikm", Status: contract.StatusComplete, Workspace: contract.Workspace{Profile: "strict-portable", Configuration: ws.ConfigDigest}, Snapshot: contract.Snapshot{ID: snap}, Result: result, Diagnostics: out, Page: page, Truncation: trunc}
 }
@@ -133,7 +148,7 @@ func Diagnostics(ctx context.Context, o Options) (Result, error) {
 		if o.Severity != "" && !strings.EqualFold(string(d.Severity), o.Severity) {
 			continue
 		}
-		v = append(v, row{d.Code, string(d.Severity), d.Message, d.Path, ir.SourceSpan{Start: d.Start, End: d.End}, map[string]any{"source": "parser"}, []string{}, []string{"inspect source span"}})
+		v = append(v, row{d.Code, string(d.Severity), d.Message, displayPath(o.Root, d.Path), ir.SourceSpan{Start: d.Start, End: d.End}, map[string]any{"source": "parser"}, []string{}, []string{"inspect source span"}})
 	}
 	items, p, t := paginate(v, o)
 	return Result{Envelope: envelope("query.diagnostics", ws, sem, s, items, p, t)}, nil
@@ -196,7 +211,7 @@ func Search(ctx context.Context, o Options) (Result, error) {
 		b, _ := os.ReadFile(d.Path)
 		for n, l := range strings.Split(string(b), "\n") {
 			if strings.Contains(strings.ToLower(l), strings.ToLower(o.Query)) {
-				v = append(v, hit{d.Path, strings.TrimSpace(l), "lexical", s, 1})
+				v = append(v, hit{displayPath(o.Root, d.Path), strings.TrimSpace(l), "lexical", s, 1})
 				_ = n
 			}
 		}
@@ -213,6 +228,16 @@ func Graph(ctx context.Context, o Options) (Result, error) {
 	g, e := graph.Build(root, entry(o.Root))
 	if e != nil {
 		return Result{}, e
+	}
+	for i := range g.Nodes {
+		g.Nodes[i].Path = displayPath(o.Root, g.Nodes[i].Path)
+		g.Nodes[i].Span.Path = displayPath(o.Root, g.Nodes[i].Span.Path)
+	}
+	for i := range g.Edges {
+		g.Edges[i].Span.Path = displayPath(o.Root, g.Edges[i].Span.Path)
+	}
+	for i := range g.Diagnostics {
+		g.Diagnostics[i].Span.Path = displayPath(o.Root, g.Diagnostics[i].Span.Path)
 	}
 	edges := append([]graph.Edge(nil), g.Edges...)
 	if o.Kind == "dependencies" && o.Path != "" {
@@ -267,10 +292,10 @@ func Inspect(ctx context.Context, o Options) (Result, error) {
 		if o.Path != "" && filepath.Clean(d.Path) != filepath.Clean(o.Path) && !strings.HasSuffix(filepath.ToSlash(d.Path), filepath.ToSlash(o.Path)) {
 			continue
 		}
-		v = append(v, summary{d.Path, d.FileType, len(d.Symbols), len(d.References), len(d.Diagnostics)})
+		v = append(v, summary{displayPath(o.Root, d.Path), d.FileType, len(d.Symbols), len(d.References), len(d.Diagnostics)})
 	}
 	items, p, t := paginate(v, o)
-	return Result{Envelope: envelope("inspect."+o.Kind, ws, sem, s, map[string]any{"documents": items, "entryPoints": []string{entry(o.Root)}, "health": "ok", "budgets": map[string]any{"limit": o.Limit}}, p, t)}, nil
+	return Result{Envelope: envelope("inspect."+o.Kind, ws, sem, s, map[string]any{"documents": items, "entryPoints": []string{displayPath(o.Root, entry(o.Root))}, "health": "ok", "budgets": map[string]any{"limit": o.Limit}}, p, t)}, nil
 }
 func Export(ctx context.Context, o Options, kind string) (Result, error) {
 	ws, sem, s, e := Analyze(ctx, o)
@@ -286,7 +311,7 @@ func Export(ctx context.Context, o Options, kind string) (Result, error) {
 	default:
 		for _, d := range ws.Documents {
 			for _, x := range d.Symbols {
-				r := map[string]any{"type": "symbol", "snapshot": s, "path": d.Path, "symbol": x}
+				r := map[string]any{"type": "symbol", "snapshot": s, "path": displayPath(o.Root, d.Path), "symbol": x}
 				z, _ := json.Marshal(r)
 				b.Write(z)
 				b.WriteByte('\n')
