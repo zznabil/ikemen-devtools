@@ -11,6 +11,30 @@ import (
 	"github.com/ikemen-engine/ikemen-devtools/internal/parser"
 )
 
+func TestResolveScopesSymbolsToCharacterPackage(t *testing.T) {
+	root := t.TempDir()
+	docs := []ir.Document{}
+	for _, name := range []string{"A", "B"} {
+		base := filepath.Join(root, "chars", name)
+		docs = append(docs,
+			*parser.Parse(filepath.Join(base, name+".def"), "[Info]\nname = "+name+"\n"),
+			*parser.Parse(filepath.Join(base, "commands.cmd"), "[Command]\nname = \"x\"\n"),
+			*parser.Parse(filepath.Join(base, "states.cns"), "[Statedef 100]\ntype = S\n[State 100, next]\ntype = ChangeState\nvalue = 100\ntrigger1 = command = \"x\"\n"),
+		)
+	}
+	result := Resolve(NewMemoryWorkspace(docs...))
+	for _, d := range result.Diagnostics {
+		if d.Code == "ambiguous-state" || d.Code == "ambiguous-command" {
+			t.Fatalf("cross-character symbol leaked into package resolution: %#v", d)
+		}
+	}
+	for _, ref := range result.References {
+		if !ref.IsDynamic && !ref.Resolved {
+			t.Fatalf("package-local reference did not resolve: %#v", ref)
+		}
+	}
+}
+
 func TestResolveNumericStateAndCommandReferences(t *testing.T) {
 	workspace := NewMemoryWorkspace(
 		ir.Document{
@@ -201,7 +225,7 @@ func TestResolveUndefinedReferences(t *testing.T) {
 	}
 }
 
-func TestResolveAmbiguousReferencesAsErrors(t *testing.T) {
+func TestResolveStateAmbiguityWhileDuplicateCommandsResolve(t *testing.T) {
 	workspace := NewMemoryWorkspace(
 		ir.Document{
 			Path: "main.def",
@@ -226,18 +250,21 @@ func TestResolveAmbiguousReferencesAsErrors(t *testing.T) {
 	result := Resolve(workspace)
 	codes := collectCodes(result.Diagnostics)
 	sort.Strings(codes)
-	expected := []string{"ambiguous-command", "ambiguous-state"}
-	sort.Strings(expected)
+	expected := []string{"ambiguous-state"}
 	if !reflect.DeepEqual(codes, expected) {
 		t.Fatalf("expected ambiguity diagnostics %#v, got %#v", expected, codes)
 	}
 	for _, ref := range result.References {
-		if ref.Classification != AmbiguousResolution || ref.Resolved {
-			t.Fatalf("expected unresolved ambiguous reference, got %#v", ref)
+		if ref.TargetPath == "duplicate.def" {
+			if !ref.Resolved || ref.Classification != ExactResolution {
+				t.Fatalf("duplicate command names should resolve deterministically, got %#v", ref)
+			}
+		} else if ref.Classification != AmbiguousResolution || ref.Resolved {
+			t.Fatalf("expected unresolved ambiguous state reference, got %#v", ref)
 		}
 	}
 	for _, d := range result.Diagnostics {
-		if d.Code == "ambiguous-state" || d.Code == "ambiguous-command" {
+		if d.Code == "ambiguous-state" {
 			if d.Severity != ir.SeverityError {
 				t.Fatalf("expected ambiguity diagnostic to be an error, got %#v", d)
 			}
@@ -325,7 +352,7 @@ func TestResolveDuplicateDefinitions(t *testing.T) {
 	}
 }
 
-func TestResolveDuplicateCommandDefinitionsAreAmbiguous(t *testing.T) {
+func TestResolveDuplicateCommandDefinitionsDeterministically(t *testing.T) {
 	workspace := NewMemoryWorkspace(
 		ir.Document{
 			Path: "cmds/main.cmd",
@@ -359,22 +386,38 @@ func TestResolveDuplicateCommandDefinitionsAreAmbiguous(t *testing.T) {
 	)
 
 	result := Resolve(workspace)
-	if len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "ambiguous-command" {
-		t.Fatalf("expected one ambiguous-command diagnostic, got %#v", result.Diagnostics)
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("duplicate command names are valid MUGEN input aliases: %#v", result.Diagnostics)
 	}
 	if len(result.References) != 1 {
 		t.Fatalf("expected one reference resolution, got %d", len(result.References))
 	}
 
 	res := result.References[0]
-	if res.Classification != AmbiguousResolution {
-		t.Fatalf("expected ambiguous classification, got %q", res.Classification)
+	if res.Classification != ExactResolution || !res.Resolved {
+		t.Fatalf("expected deterministic command resolution, got %#v", res)
 	}
-	if res.Resolved {
-		t.Fatalf("ambiguous reference should not be marked resolved")
+	if filepath.ToSlash(res.TargetPath) != "cmds/alt.cmd" {
+		t.Fatalf("expected first sorted definition, got %q", res.TargetPath)
 	}
-	if res.TargetSymbolID != "" {
-		t.Fatalf("ambiguous reference should not include a target symbol id, got %q", res.TargetSymbolID)
+}
+
+func TestResolveClassifiesDataCommonReferencesAsRuntimeDynamic(t *testing.T) {
+	doc := ir.Document{
+		Path: filepath.Join("game", "data", "common.cns"),
+		References: []ir.Reference{{
+			ID:     "ref:command",
+			Kind:   ir.ReferenceCommand,
+			Target: "command:charge",
+			Span:   span(3, 1, 3, 20),
+		}},
+	}
+	result := Resolve(NewMemoryWorkspace(doc))
+	if len(result.References) != 1 || result.References[0].Classification != DynamicResolution {
+		t.Fatalf("expected runtime-dynamic common reference, got %#v", result.References)
+	}
+	if len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "dynamic-reference" {
+		t.Fatalf("expected one dynamic warning, got %#v", result.Diagnostics)
 	}
 }
 
@@ -542,7 +585,7 @@ name = "jump"
 	}
 }
 
-func TestResolveRepeatedReferencesAcrossDuplicateDefinitionsRemainAmbiguous(t *testing.T) {
+func TestResolveRepeatedReferencesAcrossDuplicateCommands(t *testing.T) {
 	controllerDoc := parser.Parse("combat.def", `[State 100]
 type = ChangeState
 value = 100
@@ -566,17 +609,15 @@ name = "jump"
 		t.Fatalf("expected 2 command references, got %d", len(commandRefs))
 	}
 
-	seenDiagnostics := make(map[string]int)
 	for _, diag := range result.Diagnostics {
-		seenDiagnostics[diag.Code]++
-	}
-	if seenDiagnostics["ambiguous-command"] != 2 {
-		t.Fatalf("expected ambiguous-command diagnostic twice, got %#v", seenDiagnostics)
+		if diag.Code == "ambiguous-command" {
+			t.Fatalf("duplicate command names should not be ambiguous: %#v", result.Diagnostics)
+		}
 	}
 
 	for i, ref := range commandRefs {
-		if ref.Resolved || ref.Classification != AmbiguousResolution {
-			t.Fatalf("reference %d expected ambiguous classification, got resolved=%v classification=%q", i, ref.Resolved, ref.Classification)
+		if !ref.Resolved || ref.Classification != ExactResolution {
+			t.Fatalf("reference %d expected exact resolution, got resolved=%v classification=%q", i, ref.Resolved, ref.Classification)
 		}
 		if ref.ReferenceIdentity.SemanticKey != "command:jump" {
 			t.Fatalf("reference %d expected semantic key %q, got %q", i, "command:jump", ref.ReferenceIdentity.SemanticKey)

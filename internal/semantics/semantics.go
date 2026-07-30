@@ -2,7 +2,9 @@ package semantics
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/ikemen-engine/ikemen-devtools/internal/ir"
 )
@@ -89,6 +91,7 @@ func Resolve(workspace Workspace) ResolveResult {
 		symbol ir.Symbol
 	}
 
+	packageRoots := semanticPackageRoots(documents)
 	indexByName := map[string][]indexedSymbol{}
 
 	for _, doc := range documents {
@@ -99,6 +102,33 @@ func Resolve(workspace Workspace) ResolveResult {
 			}
 		}
 	}
+	targetsFor := func(name, sourcePath string) []indexedSymbol {
+		targets := indexByName[name]
+		sourceRoot := semanticPackageRoot(sourcePath, packageRoots)
+		if sourceRoot == "" {
+			return targets
+		}
+		local := make([]indexedSymbol, 0, len(targets))
+		for _, target := range targets {
+			if semanticPackageRoot(target.path, packageRoots) == sourceRoot {
+				local = append(local, target)
+			}
+		}
+		if len(local) > 0 {
+			return local
+		}
+		if isCharacterSourcePath(sourcePath) {
+			global := make([]indexedSymbol, 0, len(targets))
+			for _, target := range targets {
+				if !isCharacterSourcePath(target.path) {
+					global = append(global, target)
+				}
+			}
+			return global
+		}
+		return targets
+	}
+
 	result := ResolveResult{}
 
 	names := make([]string, 0, len(indexByName))
@@ -163,6 +193,21 @@ func Resolve(workspace Workspace) ResolveResult {
 				IsDynamic:         ref.IsDynamic,
 			}
 
+			if (ref.Kind == ir.ReferenceState || ref.Kind == ir.ReferenceCommand) && isGlobalRuntimeSourcePath(doc.Path) {
+				res.Classification = DynamicResolution
+				res.IsDynamic = true
+				result.Diagnostics = append(result.Diagnostics, makeSemanticDiagnostic(
+					doc.Path,
+					ref.Span,
+					ref.SourceSymbol,
+					"dynamic-reference",
+					ir.SeverityWarning,
+					fmt.Sprintf("shared runtime reference %q depends on the active character", ref.Target),
+				))
+				result.References = append(result.References, res)
+				continue
+			}
+
 			if ref.Kind == ir.ReferenceState {
 				if ref.IsDynamic {
 					res.Classification = DynamicResolution
@@ -178,7 +223,7 @@ func Resolve(workspace Workspace) ResolveResult {
 					continue
 				}
 
-				targets := indexByName[ref.Target]
+				targets := targetsFor(ref.Target, doc.Path)
 				if len(targets) == 0 {
 					res.Classification = InvalidResolution
 					result.Diagnostics = append(result.Diagnostics, makeSemanticDiagnostic(
@@ -215,7 +260,7 @@ func Resolve(workspace Workspace) ResolveResult {
 			}
 
 			if ref.Kind == ir.ReferenceCommand {
-				targets := indexByName[ref.Target]
+				targets := targetsFor(ref.Target, doc.Path)
 				if len(targets) == 0 {
 					result.Diagnostics = append(result.Diagnostics, makeSemanticDiagnostic(
 						doc.Path,
@@ -224,19 +269,6 @@ func Resolve(workspace Workspace) ResolveResult {
 						"undefined-command",
 						ir.SeverityError,
 						fmt.Sprintf("undefined command %q", ref.Target),
-					))
-					result.References = append(result.References, res)
-					continue
-				}
-				if len(targets) > 1 {
-					res.Classification = AmbiguousResolution
-					result.Diagnostics = append(result.Diagnostics, makeSemanticDiagnostic(
-						doc.Path,
-						ref.Span,
-						ref.SourceSymbol,
-						"ambiguous-command",
-						ir.SeverityError,
-						fmt.Sprintf("command reference %q matches %d definitions", ref.Target, len(targets)),
 					))
 					result.References = append(result.References, res)
 					continue
@@ -317,6 +349,49 @@ func Resolve(workspace Workspace) ResolveResult {
 	})
 
 	return result
+}
+func semanticPackageRoots(documents []ir.Document) []string {
+	seen := map[string]bool{}
+	roots := []string{}
+	for _, doc := range documents {
+		if !strings.EqualFold(filepath.Ext(doc.Path), ".def") {
+			continue
+		}
+		root := filepath.Clean(filepath.Dir(doc.Path))
+		key := strings.ToLower(root)
+		if !seen[key] {
+			seen[key] = true
+			roots = append(roots, root)
+		}
+	}
+	sort.Slice(roots, func(i, j int) bool {
+		if len(roots[i]) != len(roots[j]) {
+			return len(roots[i]) > len(roots[j])
+		}
+		return roots[i] < roots[j]
+	})
+	return roots
+}
+
+func semanticPackageRoot(path string, roots []string) string {
+	path = strings.ToLower(filepath.Clean(path))
+	for _, root := range roots {
+		candidate := strings.ToLower(filepath.Clean(root))
+		if path == candidate || strings.HasPrefix(path, strings.TrimRight(candidate, string(filepath.Separator))+string(filepath.Separator)) {
+			return candidate
+		}
+	}
+	return strings.ToLower(filepath.Clean(filepath.Dir(path)))
+}
+
+func isCharacterSourcePath(path string) bool {
+	path = "/" + strings.Trim(strings.ToLower(filepath.ToSlash(path)), "/") + "/"
+	return strings.Contains(path, "/chars/")
+}
+
+func isGlobalRuntimeSourcePath(path string) bool {
+	path = "/" + strings.Trim(strings.ToLower(filepath.ToSlash(path)), "/") + "/"
+	return strings.Contains(path, "/data/")
 }
 
 func makeSemanticDiagnostic(path string, span ir.SourceSpan, relatedSymbol, code string, severity ir.Severity, message string) ir.Diagnostic {

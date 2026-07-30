@@ -77,6 +77,57 @@ assets = "gfx\\arena.air"
 	}
 }
 
+func TestStartupManifestResolvesSelectCharacterConventions(t *testing.T) {
+	root := t.TempDir()
+	putManifestFile(t, root, "save/config.json", `{"System":"data/system.def"}`)
+	putManifestFile(t, root, "data/system.def", "[Files]\nselect = select.def\n")
+	putManifestFile(t, root, "data/select.def", `[Characters]
+empty
+randomselect
+Hero
+Villain\Villain.def
+chars/Boss/Boss.def
+Hero, order=1
+[Stages]
+stages/arena.def
+`)
+	putManifestFile(t, root, "chars/Hero/Hero.def", "")
+	putManifestFile(t, root, "chars/Villain/Villain.def", "")
+	putManifestFile(t, root, "chars/Boss/Boss.def", "")
+	putManifestFile(t, root, "stages/arena.def", "")
+
+	files, diags := resolveStartupManifest(root)
+	if len(diags) != 0 {
+		t.Fatalf("unexpected diagnostics: %v", diags)
+	}
+	joined := strings.ToLower(strings.Join(files, "\n"))
+	for _, want := range []string{"chars/hero/hero.def", "chars/villain/villain.def", "chars/boss/boss.def", "stages/arena.def"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("closure missing %s", want)
+		}
+	}
+}
+
+func TestStartupManifestPrefersLiteralEqualsDirectoryBeforeLegacyPrefix(t *testing.T) {
+	root := t.TempDir()
+	putManifestFile(t, root, "save/config.json", `{"TrainingChar":"chars/Hero/Hero.def"}`)
+	putManifestFile(t, root, "data/select.def", "")
+	putManifestFile(t, root, "chars/Hero/Hero.def", "[Files]\ncmd = =/cmd.cmd\ncns = =legacy.cns\nstcommon = common1.cns\n")
+	putManifestFile(t, root, "chars/Hero/=/cmd.cmd", "")
+	putManifestFile(t, root, "chars/Hero/legacy.cns", "")
+
+	files, diags := resolveStartupManifest(root)
+	if len(diags) != 0 {
+		t.Fatalf("unexpected diagnostics: %v", diags)
+	}
+	joined := strings.ToLower(strings.Join(files, "\n"))
+	for _, want := range []string{"chars/hero/=/cmd.cmd", "chars/hero/legacy.cns"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("closure missing %s", want)
+		}
+	}
+}
+
 func TestStartupManifestDiagnosticsContainmentAndDeterminism(t *testing.T) {
 	root := t.TempDir()
 	putManifestFile(t, root, "save/config.json", `{"System":"system.def"}`)

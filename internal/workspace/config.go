@@ -134,8 +134,14 @@ func ResolveConfig(root string, flags ConfigFlags) (WorkspaceConfig, error) {
 		}
 	}
 	if len(cfg.EntryPoints) == 0 {
-		cfg.EntryPoints, cfg.StartupDiagnostics = deriveGameEntryPoints(abs)
-		cfg.StartupManifest = append([]string(nil), cfg.EntryPoints...)
+		manifest, diags := deriveGameEntryPoints(abs)
+		cfg.StartupManifest = append([]string(nil), manifest...)
+		cfg.StartupDiagnostics = diags
+		for _, path := range manifest {
+			if isSemanticSourcePath(path) {
+				cfg.EntryPoints = append(cfg.EntryPoints, path)
+			}
+		}
 	}
 	if flags.Profile != "" {
 		cfg.Profile = flags.Profile

@@ -106,6 +106,21 @@ trigger1 = command = "jump"
 	}
 }
 
+func TestParseAcceptsPositionalManifestAndAnimationLines(t *testing.T) {
+	src := `[Characters]
+Hero, order=1
+Hero
+[Stages]
+stages/arena.def
+[Begin Action 10]
+10,0, 0,0, 3
+`
+	doc := Parse("system.def", src)
+	if len(doc.Diagnostics) != 0 {
+		t.Fatalf("valid positional syntax produced diagnostics: %#v", doc.Diagnostics)
+	}
+}
+
 func TestParseSourceSpans(t *testing.T) {
 	src := `[Command]
 name = "jump"
@@ -231,6 +246,27 @@ value = +1
 	}
 	if doc.Symbols[2].Name != "state-controller:-10" {
 		t.Fatalf("expected state controller name normalized as state-controller:-10, got %q", doc.Symbols[2].Name)
+	}
+}
+func TestParseStateHeaderDescriptionsAndAnonymousControllers(t *testing.T) {
+	src := `[Statedef 99030 > superdash clash]
+[State 99030, finish]
+type = ChangeState
+value = 99030
+[State ]
+type = Null
+`
+	doc := Parse("described.cmd", src)
+	if doc.Symbols[0].Name != "state:99030" {
+		t.Fatalf("expected described statedef to use numeric id, got %q", doc.Symbols[0].Name)
+	}
+	if doc.Symbols[1].Name != "state-controller:99030" {
+		t.Fatalf("expected described controller to use numeric id, got %q", doc.Symbols[1].Name)
+	}
+	for _, diag := range doc.Diagnostics {
+		if diag.Code == "malformed-state" {
+			t.Fatalf("anonymous state controller should be accepted: %#v", diag)
+		}
 	}
 }
 
