@@ -1,0 +1,20 @@
+# Built artifacts
+/dist/
+/ikm
+/ikm.exe
+*.test
+*.prof
+coverage.out
+
+# Rebuildable workspace state
+/.ikm/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+
+# Local editor and operating-system files
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
