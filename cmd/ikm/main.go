@@ -557,7 +557,11 @@ func runReadOnly(group string, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "--root is required")
 		return contract.ExitUsage
 	}
-	o := operations.Options{Root: *root, Profile: *profileName, Path: *path, Name: *name, Kind: *kind, Code: *code, Severity: *severity, Query: *query, Identity: *identity, Snapshot: *snapshot, Cursor: *cursor, Limit: *limit, IncludeDeclarations: *includeDecl}
+	operationKind := *kind
+	if group == "graph" || group == "inspect" {
+		operationKind = action
+	}
+	o := operations.Options{Root: *root, Profile: *profileName, Path: *path, Name: *name, Kind: operationKind, Code: *code, Severity: *severity, Query: *query, Identity: *identity, Snapshot: *snapshot, Cursor: *cursor, Limit: *limit, IncludeDeclarations: *includeDecl}
 	ctx := context.Background()
 	var r operations.Result
 	var err error
