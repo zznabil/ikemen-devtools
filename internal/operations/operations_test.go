@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -13,6 +14,8 @@ import (
 	"github.com/ikemen-engine/ikemen-devtools/internal/semantics"
 	"github.com/ikemen-engine/ikemen-devtools/internal/workspace"
 )
+
+var absoluteHostPath = regexp.MustCompile(`[A-Za-z]:[\\\\/]|(^|["\s])[/\\\\]{2}`)
 
 func TestPaginationStableAndCursor(t *testing.T) {
 	type row struct {
@@ -70,9 +73,37 @@ func TestExportFormatsDeterministic(t *testing.T) {
 		}
 		x := a.Envelope.Result.(map[string]any)["content"].(string)
 		y := b.Envelope.Result.(map[string]any)["content"].(string)
-		if x != y || strings.TrimSpace(x) == "" {
-			t.Fatalf("non-deterministic empty %s", kind)
+		if strings.TrimSpace(x) == "" {
+			t.Fatalf("empty %s", kind)
 		}
+		if strings.TrimSpace(strings.ReplaceAll(x, `"snapshot":"`+a.Envelope.Snapshot.ID+`"`, `"snapshot":"<snapshot>"`)) != strings.TrimSpace(strings.ReplaceAll(y, `"snapshot":"`+b.Envelope.Snapshot.ID+`"`, `"snapshot":"<snapshot>"`)) {
+			t.Fatalf("non-deterministic %s", kind)
+		}
+		raw, _ := json.Marshal(a.Envelope.Result)
+		if absoluteHostPath.Match(raw) {
+			t.Fatalf("absolute host path leaked in arbitrary %s result field: %s", kind, raw)
+		}
+		if strings.Contains(x, root) {
+			t.Fatalf("absolute host path leaked in %s export: %q", kind, x)
+		}
+		if kind == "jsonl" && !strings.Contains(x, `"type":"file"`) {
+			t.Fatalf("jsonl omitted analyzable file record: %q", x)
+		}
+	}
+	if got := normalizeExportPath(root, filepath.Join(root, "chars", "hero.def")); got != "chars/hero.def" {
+		t.Fatalf("workspace-relative Windows path = %q", got)
+	}
+}
+func TestSanitizeExportContentWindowsBackslashRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "game")
+	rootWin := strings.ReplaceAll(root, `/`, `\`)
+	content := `path=` + rootWin + `\data\hero.def other=` + rootWin + `boy\keep`
+	got := sanitizeExportContent(root, content)
+	if strings.Contains(got, rootWin+`\data`) || strings.Contains(got, strings.ReplaceAll(rootWin, `\`, `/`)+`/data`) {
+		t.Fatalf("windows absolute path leaked: %q", got)
+	}
+	if !strings.Contains(got, "boy") {
+		t.Fatalf("boundary sanitizer removed non-root prefix: %q", got)
 	}
 }
 func TestGraphDiagnosticsUseWorkspaceRelativePaths(t *testing.T) {

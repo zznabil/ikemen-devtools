@@ -69,7 +69,32 @@ func Analyze(ctx context.Context, o Options) (workspace.LoadResult, semantics.Re
 	if strings.EqualFold(o.Profile, "distribution") {
 		p = profile.NewDistributionProfile("")
 	}
-	ws := workspace.LoadWorkspaceWithProfile(entry(o.Root), p)
+	var ws workspace.LoadResult
+	if st, statErr := os.Stat(o.Root); statErr == nil && st.IsDir() {
+		cfg, cfgErr := workspace.ResolveConfig(o.Root, workspace.ConfigFlags{Profile: o.Profile})
+		if cfgErr != nil {
+			return workspace.LoadResult{}, semantics.ResolveResult{}, "", cfgErr
+		}
+		seen := map[string]bool{}
+		for _, ep := range cfg.EntryPoints {
+			pth := ep
+			if !filepath.IsAbs(pth) {
+				pth = filepath.Join(cfg.Root, filepath.FromSlash(pth))
+			}
+			part := workspace.LoadWorkspaceWithProfile(pth, p)
+			ws.Diagnostics = append(ws.Diagnostics, part.Diagnostics...)
+			for _, d := range part.Documents {
+				key := strings.ToLower(filepath.Clean(d.Path))
+				if !seen[key] {
+					seen[key] = true
+					ws.Documents = append(ws.Documents, d)
+				}
+			}
+		}
+		ws.ConfigDigest = cfg.Digest()
+	} else {
+		ws = workspace.LoadWorkspaceWithProfile(entry(o.Root), p)
+	}
 	sem := semantics.Resolve(semantics.NewMemoryWorkspace(ws.Documents...))
 	h := sha256.New()
 	for _, d := range ws.Documents {
@@ -302,6 +327,8 @@ func Export(ctx context.Context, o Options, kind string) (Result, error) {
 	if e != nil {
 		return Result{}, e
 	}
+	ws = normalizeExportWorkspace(o.Root, ws)
+	sem = normalizeExportSemantics(o.Root, sem)
 	var b strings.Builder
 	switch kind {
 	case "sql":
@@ -310,8 +337,12 @@ func Export(ctx context.Context, o Options, kind string) (Result, error) {
 		e = scip.Export(&b, ws.Documents)
 	default:
 		for _, d := range ws.Documents {
+			file := map[string]any{"type": "file", "snapshot": s, "path": d.Path, "fileType": d.FileType}
+			z, _ := json.Marshal(file)
+			b.Write(z)
+			b.WriteByte('\n')
 			for _, x := range d.Symbols {
-				r := map[string]any{"type": "symbol", "snapshot": s, "path": displayPath(o.Root, d.Path), "symbol": x}
+				r := map[string]any{"type": "symbol", "snapshot": s, "path": d.Path, "symbol": x}
 				z, _ := json.Marshal(r)
 				b.Write(z)
 				b.WriteByte('\n')
@@ -321,7 +352,84 @@ func Export(ctx context.Context, o Options, kind string) (Result, error) {
 	if e != nil {
 		return Result{}, e
 	}
+	content := sanitizeExportContent(o.Root, b.String())
+	if content != b.String() {
+		b.Reset()
+		b.WriteString(content)
+	}
 	return Result{Envelope: envelope("export."+kind, ws, sem, s, map[string]any{"format": kind, "records": strings.Count(b.String(), "\n"), "content": b.String()}, contract.Page{Returned: strings.Count(b.String(), "\n")}, contract.Truncation{})}, nil
+}
+
+func exportRoot(root string) string {
+	abs, err := filepath.Abs(root)
+	if err == nil {
+		if st, e := os.Stat(abs); e == nil && !st.IsDir() {
+			return filepath.Dir(abs)
+		}
+		return abs
+	}
+	return root
+}
+func normalizeExportPath(root, path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	absRoot, er := filepath.Abs(exportRoot(root))
+	absPath, ep := filepath.Abs(path)
+	if er == nil && ep == nil {
+		if rel, err := filepath.Rel(absRoot, absPath); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+			return filepath.ToSlash(rel)
+		}
+	}
+	return filepath.ToSlash(filepath.Base(path))
+}
+
+func normalizeExportWorkspace(root string, ws workspace.LoadResult) workspace.LoadResult {
+	for i := range ws.Documents {
+		d := &ws.Documents[i]
+		d.Path = normalizeExportPath(root, d.Path)
+		for j := range d.Diagnostics {
+			d.Diagnostics[j].Path = d.Path
+		}
+	}
+	for i := range ws.Diagnostics {
+		ws.Diagnostics[i].Path = normalizeExportPath(root, ws.Diagnostics[i].Path)
+	}
+	return ws
+}
+
+func normalizeExportSemantics(root string, sem semantics.ResolveResult) semantics.ResolveResult {
+	for i := range sem.References {
+		sem.References[i].SourcePath = normalizeExportPath(root, sem.References[i].SourcePath)
+		sem.References[i].TargetPath = normalizeExportPath(root, sem.References[i].TargetPath)
+	}
+	return sem
+}
+
+func sanitizeExportContent(root, content string) string {
+	abs, err := filepath.Abs(exportRoot(root))
+	if err != nil {
+		return content
+	}
+	variants := []string{abs, filepath.ToSlash(abs), strings.ReplaceAll(abs, `\`, `/`), strings.ReplaceAll(abs, `/`, `\`)}
+	for _, v := range variants {
+		content = strings.ReplaceAll(content, v+string(filepath.Separator), "")
+		content = strings.ReplaceAll(content, v+"/", "")
+		content = strings.ReplaceAll(content, v+`\`, "")
+		for {
+			i := strings.Index(content, v)
+			if i < 0 {
+				break
+			}
+			end := i + len(v)
+			if end == len(content) || strings.ContainsRune("/\\\"' ,;:)]}\r\n", rune(content[end])) {
+				content = content[:i] + content[end:]
+			} else {
+				break
+			}
+		}
+	}
+	return content
 }
 func WriteJSON(w io.Writer, r Result) error {
 	b, e := r.Envelope.CanonicalJSON()

@@ -29,6 +29,7 @@ type DiscoveryResult struct {
 	Orphans      int              `json:"orphans"`
 	Truncated    bool             `json:"truncated"`
 	Reasons      []string         `json:"truncationReasons,omitempty"`
+	Diagnostics  []string         `json:"diagnostics,omitempty"`
 	ConfigDigest string           `json:"configurationDigest"`
 }
 type Snapshot struct {
@@ -44,10 +45,10 @@ func Discover(root string, cfg WorkspaceConfig) (DiscoveryResult, error) {
 	if e != nil {
 		return DiscoveryResult{}, e
 	}
-	d := DiscoveryResult{Version: ManifestVersion, Root: a.Root(), ConfigDigest: cfg.Digest()}
+	d := DiscoveryResult{Version: ManifestVersion, Root: a.Root(), ConfigDigest: cfg.Digest(), Diagnostics: append([]string(nil), cfg.StartupDiagnostics...)}
 	ignore := loadIgnore(a.Root())
 	entries := map[string]string{}
-	for _, ep := range cfg.EntryPoints {
+	for _, ep := range append(append([]string(nil), cfg.EntryPoints...), cfg.StartupManifest...) {
 		p, e := a.Resolve(ep)
 		if e == nil {
 			entries[p.Canonical] = ep
@@ -63,11 +64,14 @@ func Discover(root string, cfg WorkspaceConfig) (DiscoveryResult, error) {
 			if path != a.Root() && ignored(filepath.ToSlash(rel), ignore) {
 				return fs.SkipDir
 			}
+			if path != a.Root() && defaultExcluded(filepath.ToSlash(rel)) {
+				return fs.SkipDir
+			}
 			return nil
 		}
 		rel, _ := filepath.Rel(a.Root(), path)
 		rel = filepath.ToSlash(rel)
-		if ignored(rel, ignore) || strings.HasPrefix(rel, ".ikm/") {
+		if ignored(rel, ignore) || strings.HasPrefix(rel, ".ikm/") || defaultExcluded(rel) || generatedBinary(rel) {
 			return nil
 		}
 		paths = append(paths, path)
@@ -105,13 +109,29 @@ func Discover(root string, cfg WorkspaceConfig) (DiscoveryResult, error) {
 	return d, nil
 }
 func (d DiscoveryResult) Snapshot() Snapshot {
+	files := append([]DiscoveredFile(nil), d.Files...)
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].Path != files[j].Path {
+			return files[i].Path < files[j].Path
+		}
+		if files[i].SHA256 != files[j].SHA256 {
+			return files[i].SHA256 < files[j].SHA256
+		}
+		return files[i].EntryPoint < files[j].EntryPoint
+	})
+	identityFiles := make([]DiscoveredFile, 0, len(files))
+	for _, f := range files {
+		if f.Active {
+			identityFiles = append(identityFiles, f)
+		}
+	}
 	b, _ := json.Marshal(struct {
 		Files     []DiscoveredFile `json:"files"`
 		Truncated bool             `json:"truncated"`
 		Reasons   []string         `json:"reasons,omitempty"`
-	}{d.Files, d.Truncated, d.Reasons})
+	}{identityFiles, d.Truncated, append([]string(nil), d.Reasons...)})
 	h := sha256.Sum256(b)
-	return Snapshot{Version: ManifestVersion, ID: hex.EncodeToString(h[:]), Files: d.Files, Truncated: d.Truncated, Reasons: d.Reasons}
+	return Snapshot{Version: ManifestVersion, ID: hex.EncodeToString(h[:]), Files: files, Truncated: d.Truncated, Reasons: d.Reasons}
 }
 func loadIgnore(root string) []string {
 	b, e := os.ReadFile(filepath.Join(root, ".ikmignore"))
@@ -140,6 +160,22 @@ func ignored(path string, pats []string) bool {
 		if strings.HasPrefix(path, p+"/") {
 			return true
 		}
+	}
+	return false
+}
+func defaultExcluded(rel string) bool {
+	rel = strings.ToLower(filepath.ToSlash(rel))
+	for _, p := range []string{"_upstream/", "tooling/", "cache/", "logs/", "log/", "generated/"} {
+		if strings.HasPrefix(rel, p) || strings.Contains(rel, "/"+p) {
+			return true
+		}
+	}
+	return false
+}
+func generatedBinary(rel string) bool {
+	switch strings.ToLower(filepath.Ext(rel)) {
+	case ".exe", ".dll", ".so", ".dylib", ".zip", ".7z", ".rar", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".wav", ".mp3", ".ogg":
+		return true
 	}
 	return false
 }

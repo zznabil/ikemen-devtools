@@ -29,16 +29,19 @@ type Budgets struct {
 }
 
 type WorkspaceConfig struct {
-	Version       string   `json:"version"`
-	Root          string   `json:"root"`
-	Profile       string   `json:"profile"`
-	EntryPoints   []string `json:"entryPoints"`
-	Cache         string   `json:"cache"`
-	Adapters      []string `json:"adapters"`
-	ExternalRoots []string `json:"externalRoots"`
-	Includes      []string `json:"includes"`
-	Excludes      []string `json:"excludes"`
-	Budgets       Budgets  `json:"budgets"`
+	Version             string   `json:"version"`
+	Root                string   `json:"root"`
+	Profile             string   `json:"profile"`
+	EntryPoints         []string `json:"entryPoints"`
+	StartupManifest     []string `json:"startupManifest,omitempty"`
+	StartupDiagnostics  []string `json:"startupDiagnostics,omitempty"`
+	Cache               string   `json:"cache"`
+	Adapters            []string `json:"adapters"`
+	ExternalRoots       []string `json:"externalRoots"`
+	Includes            []string `json:"includes"`
+	Excludes            []string `json:"excludes"`
+	Budgets             Budgets  `json:"budgets"`
+	entryPointsExplicit bool
 }
 
 type ConfigFlags struct {
@@ -109,6 +112,7 @@ func ResolveConfig(root string, flags ConfigFlags) (WorkspaceConfig, error) {
 		}
 		if fileCfg.Cache != "" {
 			cfg.Cache = fileCfg.Cache
+			cfg.entryPointsExplicit = fileCfg.EntryPoints != nil
 		}
 		if fileCfg.EntryPoints != nil {
 			cfg.EntryPoints = fileCfg.EntryPoints
@@ -128,11 +132,10 @@ func ResolveConfig(root string, flags ConfigFlags) (WorkspaceConfig, error) {
 		if fileCfg.Budgets != (Budgets{}) {
 			cfg.Budgets = fileCfg.Budgets
 		}
-	} else if !os.IsNotExist(readErr) {
-		return WorkspaceConfig{}, &ConfigError{Code: "read", Err: readErr}
 	}
 	if len(cfg.EntryPoints) == 0 {
-		cfg.EntryPoints = deriveGameEntryPoints(abs)
+		cfg.EntryPoints, cfg.StartupDiagnostics = deriveGameEntryPoints(abs)
+		cfg.StartupManifest = append([]string(nil), cfg.EntryPoints...)
 	}
 	if flags.Profile != "" {
 		cfg.Profile = flags.Profile
@@ -142,9 +145,7 @@ func ResolveConfig(root string, flags ConfigFlags) (WorkspaceConfig, error) {
 	}
 	if flags.EntryPoints != nil {
 		cfg.EntryPoints = flags.EntryPoints
-	}
-	if flags.Adapters != nil {
-		cfg.Adapters = flags.Adapters
+		cfg.entryPointsExplicit = true
 	}
 	if flags.ExternalRoots != nil {
 		cfg.ExternalRoots = flags.ExternalRoots
@@ -167,31 +168,9 @@ func ResolveConfig(root string, flags ConfigFlags) (WorkspaceConfig, error) {
 	return normalizeConfig(cfg), nil
 }
 
-func deriveGameEntryPoints(root string) []string {
-	data, err := os.ReadFile(filepath.Join(root, "save", "config.json"))
-	if err != nil {
-		return []string{}
-	}
-	var raw struct {
-		Motif      string `json:"Motif"`
-		System     string `json:"System"`
-		StartStage string `json:"StartStage"`
-	}
-	if json.Unmarshal(data, &raw) != nil {
-		return []string{}
-	}
-	out := []string{"data/select.def"}
-	for _, p := range []string{raw.Motif, raw.System, raw.StartStage} {
-		p = filepath.ToSlash(strings.TrimSpace(p))
-		if p == "" {
-			continue
-		}
-		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(p))); err == nil {
-			out = append(out, p)
-		}
-	}
-	sort.Strings(out)
-	return out
+func deriveGameEntryPoints(root string) ([]string, []string) {
+	manifest, diags := resolveStartupManifest(root)
+	return manifest, diags
 }
 
 // LoadConfig is the explicit-root entry point for workspace configuration.
