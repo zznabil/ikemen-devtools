@@ -991,6 +991,9 @@ func canonicalizePath(path string) string {
 	if trimmed == "" || trimmed == "." {
 		return ""
 	}
+	// Normalize authored Windows separators before cleaning so snapshots are
+	// deterministic on every host OS.
+	trimmed = strings.ReplaceAll(trimmed, "\\", "/")
 	clean := filepath.Clean(trimmed)
 	return filepath.ToSlash(clean)
 }

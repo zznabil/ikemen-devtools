@@ -36,13 +36,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
-          go-version-file: _upstream/ikemen-devtools/go.mod
-          cache-dependency-path: _upstream/ikemen-devtools/go.sum
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
       - name: Build reproducible binary
         shell: bash
-        working-directory: _upstream/ikemen-devtools
+        working-directory: .
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -53,20 +53,20 @@ jobs:
           sha256sum "dist/ikm-${GOOS}-${GOARCH}${{ matrix.suffix }}" > "dist/ikm-${GOOS}-${GOARCH}.sha256"
       - uses: sigstore/cosign-installer@v3
       - name: Sign checksum manifest
-        working-directory: _upstream/ikemen-devtools
+        working-directory: .
         run: cosign sign-blob --yes --output-signature dist/ikm-${{ matrix.goos }}-${{ matrix.goarch }}.sha256.sig --output-certificate dist/ikm-${{ matrix.goos }}-${{ matrix.goarch }}.sha256.pem dist/ikm-${{ matrix.goos }}-${{ matrix.goarch }}.sha256
       - uses: anchore/sbom-action@v0
         with:
-          path: _upstream/ikemen-devtools/dist/ikm-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
+          path: dist/ikm-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
           format: spdx-json
-          output-file: _upstream/ikemen-devtools/dist/ikm-${{ matrix.goos }}-${{ matrix.goarch }}.sbom.json
+          output-file: dist/ikm-${{ matrix.goos }}-${{ matrix.goarch }}.sbom.json
       - uses: actions/upload-artifact@v4
         with:
           name: ikm-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: _upstream/ikemen-devtools/dist/*
+          path: dist/*
       - uses: actions/attest@v4
         with:
-          subject-path: _upstream/ikemen-devtools/dist/ikm-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
+          subject-path: dist/ikm-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
 
   compiled-uat:
     needs: build
@@ -81,9 +81,9 @@ jobs:
         run: |
           chmod +x dist/ikm-linux-amd64
           dist/ikm-linux-amd64 version --json
-          dist/ikm-linux-amd64 doctor --json --root _upstream/ikemen-devtools
+          dist/ikm-linux-amd64 doctor --json --root .
           dist/ikm-linux-amd64 capabilities --json
-          dist/ikm-linux-amd64 workspace --root _upstream/ikemen-devtools --json scan
+          dist/ikm-linux-amd64 workspace --root . --json scan
           printf 'Content-Length: 67\\r\\n\\r\\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}' | dist/ikm-linux-amd64 mcp >/tmp/mcp.json
           printf 'Content-Length: 67\\r\\n\\r\\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}' | dist/ikm-linux-amd64 lsp >/tmp/lsp.json
 
@@ -98,8 +98,8 @@ jobs:
           merge-multiple: true
       - name: Add license notices
         run: |
-          cp _upstream/ikemen-devtools/LICENSE dist/LICENSE
-          cp _upstream/ikemen-devtools/LICENSES.json dist/LICENSES.json
+          cp LICENSE dist/LICENSE
+          cp LICENSES.json dist/LICENSES.json
       - uses: sigstore/cosign-installer@v3
       - name: Verify signatures
         run: |

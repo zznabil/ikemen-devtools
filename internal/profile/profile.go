@@ -161,8 +161,8 @@ func (p CompatibilityProfile) NormalizeSourceValue(raw string) string {
 		} else {
 			value = strings.TrimLeft(value, `\\/`)
 		}
-	} else if strings.HasPrefix(value, `\\`) && !isUNC(value) {
-		value = strings.TrimLeft(value, `\\`)
+	} else if strings.HasPrefix(value, `\`) && !isUNC(value) {
+		value = strings.TrimLeft(value, `\/`)
 	}
 
 	value = p.normalizeSlashSeparators(value)
