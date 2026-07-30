@@ -51,6 +51,28 @@ func TestStandardProviderCapturesCommentsBlankLines(t *testing.T) {
 	}
 }
 
+func TestStandardProviderAcceptsSlashComments(t *testing.T) {
+	source := []byte("// full-line comment\nvalue = 1\n")
+	doc := NewStandardProvider().Parse("comments.cns", source)
+	got := make([]TokenKind, len(doc.Tokens))
+	for i, token := range doc.Tokens {
+		got[i] = token.Kind
+	}
+	want := []TokenKind{TokenComment, TokenKeyValue, TokenBlank}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected slash-comment tokens\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestStandardProviderAcceptsDirectiveLikeComments(t *testing.T) {
+	doc := NewStandardProvider().Parse("common2.cns", []byte(";sys::bonus_up\n"))
+	for _, token := range doc.Tokens {
+		if token.Kind == TokenMalformed {
+			t.Fatalf("directive-like comment was malformed: %#v", doc.Tokens)
+		}
+	}
+}
+
 func TestStandardProviderCapturesMalformedLines(t *testing.T) {
 	source := []byte("[State 1]\nnot a key value\nbadkey noeq\n[Command]\nname jump\n")
 	provider := NewStandardProvider()

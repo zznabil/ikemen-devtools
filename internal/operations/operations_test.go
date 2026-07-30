@@ -11,6 +11,7 @@ import (
 
 	"github.com/ikemen-engine/ikemen-devtools/internal/contract"
 	"github.com/ikemen-engine/ikemen-devtools/internal/graph"
+	"github.com/ikemen-engine/ikemen-devtools/internal/ir"
 	"github.com/ikemen-engine/ikemen-devtools/internal/semantics"
 	"github.com/ikemen-engine/ikemen-devtools/internal/workspace"
 )
@@ -57,6 +58,52 @@ func TestEnvelopeCanonicalFields(t *testing.T) {
 		}
 	}
 }
+func TestAnalyzeUsesConfiguredDistributionProfile(t *testing.T) {
+	root := t.TempDir()
+	for path, body := range map[string]string{
+		".ikm/config.json":     `{"version":"0.1","profile":"distribution","cache":"memory"}`,
+		"save/config.json":     `{"TrainingChar":"chars/Hero/Hero.def"}`,
+		"data/select.def":      "",
+		"chars/Hero/Hero.def":  "[Files]\ncmd = =/cmd.cmd\n",
+		"chars/Hero/=/cmd.cmd": "[Command]\nname = \"x\"\n",
+	} {
+		full := filepath.Join(root, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ws, _, _, err := Analyze(context.Background(), Options{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range ws.Diagnostics {
+		if d.Code == "missing-source" {
+			t.Fatalf("configured distribution profile was ignored: %#v", d)
+		}
+	}
+	result, err := Diagnostics(context.Background(), Options{Root: root, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Envelope.Workspace.Profile != "distribution" {
+		t.Fatalf("envelope reported wrong profile: %q", result.Envelope.Workspace.Profile)
+	}
+}
+
+func TestDedupeDiagnosticsIgnoresWindowsPathCase(t *testing.T) {
+	span := ir.SourcePosition{Line: 2, Column: 3}
+	got := dedupeDiagnostics([]ir.Diagnostic{
+		{Path: `C:\Game\chars\Hero\main.cns`, Code: "malformed-line", Message: "bad", Start: span, End: span},
+		{Path: `c:\game\CHARS\hero\main.cns`, Code: "malformed-line", Message: "bad", Start: span, End: span},
+	})
+	if len(got) != 1 {
+		t.Fatalf("expected one canonical diagnostic, got %#v", got)
+	}
+}
+
 func TestExportFormatsDeterministic(t *testing.T) {
 	root := t.TempDir()
 	def := filepath.Join(root, "hero.def")

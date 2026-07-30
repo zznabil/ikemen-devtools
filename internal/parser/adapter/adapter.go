@@ -93,9 +93,6 @@ func FromSyntax(path string, sections []Section, tokens []Token) *ir.Document {
 					Raw:      strings.TrimSpace(stateArg),
 				}
 				doc.Symbols = append(doc.Symbols, symbol)
-				if strings.TrimSpace(stateArg) == "" {
-					doc.Diagnostics = append(doc.Diagnostics, makeDiagnostic(path, ir.SeverityError, "missing state id", "malformed-state", lineNo, section.Span))
-				}
 				controller = &stateControllerContext{
 					symbolID:      symbol.ID,
 					stateName:     sectionName,
@@ -127,9 +124,10 @@ func FromSyntax(path string, sections []Section, tokens []Token) *ir.Document {
 		section := &doc.Sections[currentSectionIdx]
 		if token.Kind == TokenMalformed {
 			lineSpan := token.Span
-			doc.Diagnostics = append(doc.Diagnostics, makeDiagnostic(path, ir.SeverityError, "expected key=value", "malformed-line", lineNo, lineSpan))
-			s := &doc.Sections[currentSectionIdx]
-			s.Lines = append(s.Lines, ir.SourceLine{Kind: ir.SourceLineMalformed, Text: strings.TrimSpace(token.Text), Span: lineSpan})
+			if !allowsPositionalLines(section.Header) {
+				doc.Diagnostics = append(doc.Diagnostics, makeDiagnostic(path, ir.SeverityError, "expected key=value", "malformed-line", lineNo, lineSpan))
+			}
+			section.Lines = append(section.Lines, ir.SourceLine{Kind: ir.SourceLineMalformed, Text: strings.TrimSpace(token.Text), Span: lineSpan})
 			continue
 		}
 
@@ -257,8 +255,17 @@ func sectionHeaderArgument(header string) string {
 	return strings.TrimSpace(strings.TrimPrefix(header, parts[0]))
 }
 
+func stateHeaderID(raw string) string {
+	id, _, _ := strings.Cut(raw, ",")
+	fields := strings.Fields(id)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
 func canonicalStateName(raw string) string {
-	name := strings.TrimSpace(raw)
+	name := stateHeaderID(raw)
 	if name == "" {
 		return "state:unknown"
 	}
@@ -269,7 +276,7 @@ func canonicalStateName(raw string) string {
 }
 
 func canonicalStateControllerName(raw string) string {
-	name := strings.TrimSpace(raw)
+	name := stateHeaderID(raw)
 	if name == "" {
 		return "state-controller:unknown"
 	}
@@ -437,6 +444,14 @@ func parseReferenceValue(v string) string {
 		return ""
 	}
 	return fields[0]
+}
+
+func allowsPositionalLines(header string) bool {
+	header = strings.ToLower(strings.TrimSpace(header))
+	return header == "characters" ||
+		header == "stages" ||
+		header == "extrastages" ||
+		strings.HasPrefix(header, "begin action ")
 }
 
 // stateControllerContext tracks pending state transition context while scanning section.

@@ -75,6 +75,7 @@ name = "run"
 	writeTextFile(t, defPath, `[files]
 cmd = fighter.cmd
 st = missing.st
+stcommon = common1.cns
 `)
 
 	result := LoadWorkspace(defPath)

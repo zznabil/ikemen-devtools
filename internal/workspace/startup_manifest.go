@@ -33,6 +33,37 @@ func resolveStartupManifest(root string) ([]string, []string) {
 		}
 		return p
 	}
+	addCharacter := func(path string) string {
+		path = strings.Trim(strings.TrimSpace(path), "\"'")
+		path = strings.TrimPrefix(path, "=")
+		switch strings.ToLower(path) {
+		case "", "empty", "randomselect":
+			return ""
+		}
+		try := []string{path}
+		if !strings.EqualFold(filepath.Ext(filepath.FromSlash(strings.ReplaceAll(path, "\\", "/"))), ".def") {
+			clean := strings.TrimSuffix(strings.ReplaceAll(path, "\\", "/"), "/")
+			name := filepath.Base(filepath.FromSlash(clean))
+			try = append([]string{clean + "/" + name + ".def", clean + ".def"}, try...)
+		}
+		for _, candidate := range try {
+			if p, amb := resolveManifestPath(root, candidate, filepath.Join(root, "chars")); p != "" {
+				if amb {
+					diags = append(diags, fmt.Sprintf("ambiguous-manifest-path:%s", path))
+				}
+				rel, _ := filepath.Rel(root, p)
+				rel = filepath.ToSlash(rel)
+				if !seen[rel] {
+					seen[rel] = true
+					out = append(out, rel)
+				}
+				return p
+			}
+		}
+		diags = append(diags, fmt.Sprintf("missing-manifest-file:%s", path))
+		return ""
+	}
+
 	var walk func(string, int)
 	walk = func(path string, depth int) {
 		if depth > 64 || path == "" {
@@ -60,6 +91,11 @@ func resolveStartupManifest(root string) ([]string, []string) {
 					kl := strings.ToLower(k)
 					if kl == "select" || kl == "fight" || kl == "fonts" || kl == "assets" || kl == "cmd" || kl == "command" || kl == "cns" || kl == "st" || kl == "stcommon" || kl == "air" || kl == "sff" || kl == "snd" || strings.Contains(kl, "asset") {
 						for _, ref := range splitRefs(v) {
+							if kl == "stcommon" && strings.EqualFold(filepath.Base(filepath.FromSlash(strings.ReplaceAll(ref, "\\", "/"))), "common1.cns") {
+								if p, _ := resolveManifestPath(root, ref, base); p == "" {
+									continue
+								}
+							}
 							if p := add(ref, base); p != "" {
 								walk(p, depth+1)
 							}
@@ -95,25 +131,31 @@ func resolveStartupManifest(root string) ([]string, []string) {
 		selectPath = add("select.def", root)
 	}
 	if selectPath != "" {
-		sections := parseManifestSections(readFile(selectPath))
+		sections := parseManifestSectionLines(readFile(selectPath))
 		base := filepath.Dir(selectPath)
 		for sec, lines := range sections {
 			low := strings.ToLower(sec)
 			if low != "characters" && low != "stages" && low != "extrastages" {
 				continue
 			}
-			for _, v := range lines {
-				refs := splitRefs(v)
-				if low == "characters" && len(refs) > 2 {
-					refs = refs[:2]
+			for _, line := range lines {
+				refs := splitRefs(line)
+				if len(refs) == 0 {
+					continue
 				}
-				for i, ref := range refs {
-					if low == "characters" && i == 1 && !strings.Contains(strings.ToLower(ref), ".def") && !strings.Contains(ref, "/") && !strings.Contains(ref, "\\") {
-						continue
-					}
-					if p := add(ref, base); p != "" {
+				if low == "characters" {
+					if p := addCharacter(refs[0]); p != "" {
 						walk(p, 0)
 					}
+					if len(refs) > 1 && (strings.Contains(strings.ToLower(refs[1]), ".def") || strings.Contains(refs[1], "/") || strings.Contains(refs[1], "\\")) {
+						if p := add(refs[1], base); p != "" {
+							walk(p, 0)
+						}
+					}
+					continue
+				}
+				if p := add(refs[0], base); p != "" {
+					walk(p, 0)
 				}
 			}
 		}
@@ -157,7 +199,6 @@ func splitRefs(v string) []string {
 	out := []string{}
 	for _, p := range parts {
 		p = strings.Trim(strings.TrimSpace(p), "\"'")
-		p = strings.TrimPrefix(p, "=")
 		if p != "" {
 			out = append(out, p)
 		}
@@ -186,34 +227,56 @@ func parseManifestSections(text string) map[string]map[string]string {
 	}
 	return out
 }
+func parseManifestSectionLines(text string) map[string][]string {
+	out := map[string][]string{}
+	sec := ""
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.Contains(line, "]") {
+			sec = strings.TrimSpace(line[1:strings.Index(line, "]")])
+			continue
+		}
+		out[sec] = append(out[sec], line)
+	}
+	return out
+}
+
 func resolveManifestPath(root, raw, declaring string) (string, bool) {
 	raw = strings.Trim(strings.TrimSpace(raw), "\"'")
-	raw = strings.TrimPrefix(raw, "=")
-	raw = strings.ReplaceAll(raw, "\\", string(filepath.Separator))
 	if raw == "" {
 		return "", false
 	}
-	candidates := []string{}
-	if filepath.IsAbs(raw) {
-		candidates = []string{raw}
-	} else {
-		candidates = []string{filepath.Join(declaring, raw), filepath.Join(root, "data", raw), filepath.Join(root, raw)}
+	variants := []string{raw}
+	if strings.HasPrefix(raw, "=") {
+		variants = append(variants, strings.TrimPrefix(raw, "="))
 	}
-	found := []string{}
-	for _, c := range candidates {
-		if p := caseInsensitiveExisting(c); p != "" {
-			if withinPath(root, p) {
-				found = append(found, p)
-			} else {
-				return "", false
+	for _, variant := range variants {
+		variant = strings.ReplaceAll(variant, "\\", string(filepath.Separator))
+		candidates := []string{}
+		if filepath.IsAbs(variant) {
+			candidates = []string{variant}
+		} else {
+			candidates = []string{filepath.Join(declaring, variant), filepath.Join(root, "data", variant), filepath.Join(root, variant)}
+		}
+		found := []string{}
+		for _, c := range candidates {
+			if p := caseInsensitiveExisting(c); p != "" {
+				if withinPath(root, p) {
+					found = append(found, p)
+				} else {
+					return "", false
+				}
 			}
 		}
+		found = uniqueStrings(found)
+		if len(found) > 0 {
+			return found[0], len(found) > 1
+		}
 	}
-	found = uniqueStrings(found)
-	if len(found) == 0 {
-		return "", false
-	}
-	return found[0], len(found) > 1
+	return "", false
 }
 func withinPath(root, p string) bool {
 	r, _ := filepath.Abs(root)

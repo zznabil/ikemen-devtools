@@ -17,6 +17,7 @@ type LoadResult struct {
 	Documents    []ir.Document
 	Diagnostics  []ir.Diagnostic
 	ConfigDigest string
+	Profile      string
 }
 
 // LoadWorkspaceConfigured resolves the root-scoped .ikm configuration before loading an entry point.
@@ -48,7 +49,7 @@ func LoadWorkspaceWithProfile(defPath string, p profile.CompatibilityProfile) Lo
 		p = profile.NewStrictPortableProfile("")
 	}
 
-	result := LoadResult{}
+	result := LoadResult{Profile: p.Name}
 	if strings.TrimSpace(defPath) == "" {
 		result.Diagnostics = append(result.Diagnostics, makeWorkspaceDiagnostic(
 			"",
@@ -101,6 +102,9 @@ func LoadWorkspaceWithProfile(defPath string, p profile.CompatibilityProfile) Lo
 
 		sourceDoc, parseErr := parseWorkspaceFile(resolved)
 		if parseErr != nil {
+			if strings.EqualFold(ref.key, "stcommon") && strings.EqualFold(filepath.Base(ref.path), "common1.cns") {
+				continue
+			}
 			result.Diagnostics = append(result.Diagnostics,
 				makeWorkspaceDiagnostic(
 					cleanDefPath,
@@ -128,6 +132,9 @@ func LoadWorkspaceWithProfile(defPath string, p profile.CompatibilityProfile) Lo
 			result.Diagnostics = append(result.Diagnostics, makeWorkspaceDiagnostic(cleanDefPath, ir.SourceSpan{}, "startup-manifest", ir.SeverityWarning, msg))
 		}
 		for _, rel := range manifest {
+			if !isSemanticSourcePath(rel) {
+				continue
+			}
 			resolved := canonicalWorkspacePath(filepath.Join(manifestRoot, filepath.FromSlash(rel)))
 			key := p.DedupKey(resolved)
 			doc, parseErr := parseWorkspaceFile(resolved)
@@ -145,6 +152,7 @@ func LoadWorkspaceWithProfile(defPath string, p profile.CompatibilityProfile) Lo
 
 type sourceRef struct {
 	path string
+	key  string
 	span ir.SourceSpan
 }
 
@@ -169,7 +177,7 @@ func sourceReferences(doc *ir.Document, p profile.CompatibilityProfile) []source
 			if value == "" {
 				continue
 			}
-			refs = append(refs, sourceRef{path: value, span: line.Span})
+			refs = append(refs, sourceRef{path: value, key: strings.TrimSpace(line.Key), span: line.Span})
 		}
 	}
 	return refs
@@ -192,6 +200,15 @@ func isWorkspaceFileKey(key string) bool {
 		}
 	}
 	return false
+}
+
+func isSemanticSourcePath(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".def", ".cns", ".cmd", ".st", ".txt", ".reb1":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseWorkspaceFile(path string) (*ir.Document, error) {

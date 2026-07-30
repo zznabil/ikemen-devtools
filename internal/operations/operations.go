@@ -66,15 +66,14 @@ func Analyze(ctx context.Context, o Options) (workspace.LoadResult, semantics.Re
 		return workspace.LoadResult{}, semantics.ResolveResult{}, "", err
 	}
 	p := profile.NewStrictPortableProfile("")
-	if strings.EqualFold(o.Profile, "distribution") {
-		p = profile.NewDistributionProfile("")
-	}
 	var ws workspace.LoadResult
 	if st, statErr := os.Stat(o.Root); statErr == nil && st.IsDir() {
 		cfg, cfgErr := workspace.ResolveConfig(o.Root, workspace.ConfigFlags{Profile: o.Profile})
 		if cfgErr != nil {
 			return workspace.LoadResult{}, semantics.ResolveResult{}, "", cfgErr
 		}
+		p = cfg.ProfileValue()
+		ws.Profile = p.Name
 		seen := map[string]bool{}
 		for _, ep := range cfg.EntryPoints {
 			pth := ep
@@ -97,6 +96,7 @@ func Analyze(ctx context.Context, o Options) (workspace.LoadResult, semantics.Re
 	}
 	sem := semantics.Resolve(semantics.NewMemoryWorkspace(ws.Documents...))
 	h := sha256.New()
+	ws.Diagnostics = dedupeDiagnostics(ws.Diagnostics)
 	for _, d := range ws.Documents {
 		io.WriteString(h, d.Path)
 		io.WriteString(h, d.Version)
@@ -106,6 +106,22 @@ func Analyze(ctx context.Context, o Options) (workspace.LoadResult, semantics.Re
 	}
 	return ws, sem, hex.EncodeToString(h.Sum(nil))[:16], nil
 }
+func dedupeDiagnostics(in []ir.Diagnostic) []ir.Diagnostic {
+	seen := map[string]bool{}
+	out := make([]ir.Diagnostic, 0, len(in))
+	for _, d := range in {
+		key := strings.ToLower(fmt.Sprintf("%s|%s|%s|%d:%d-%d:%d|%s",
+			filepath.Clean(d.Path), d.Code, d.Message,
+			d.Start.Line, d.Start.Column, d.End.Line, d.End.Column, d.RelatedSymbol))
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, d)
+	}
+	return out
+}
+
 func paginate[T any](v []T, o Options) ([]T, contract.Page, contract.Truncation) {
 	sort.SliceStable(v, func(i, j int) bool {
 		a, _ := json.Marshal(v[i])
@@ -148,7 +164,11 @@ func envelope(op string, ws workspace.LoadResult, sem semantics.ResolveResult, s
 	for _, d := range ds {
 		out = append(out, contract.Diagnostic{Code: d.Code, Severity: string(d.Severity), Message: d.Message, Evidence: map[string]any{"nextChecks": []string{}}})
 	}
-	return contract.Envelope{SchemaVersion: contract.SchemaVersion, Operation: op, Tool: "ikm", Status: contract.StatusComplete, Workspace: contract.Workspace{Profile: "strict-portable", Configuration: ws.ConfigDigest}, Snapshot: contract.Snapshot{ID: snap}, Result: result, Diagnostics: out, Page: page, Truncation: trunc}
+	profileName := ws.Profile
+	if profileName == "" {
+		profileName = "strict-portable"
+	}
+	return contract.Envelope{SchemaVersion: contract.SchemaVersion, Operation: op, Tool: "ikm", Status: contract.StatusComplete, Workspace: contract.Workspace{Profile: profileName, Configuration: ws.ConfigDigest}, Snapshot: contract.Snapshot{ID: snap}, Result: result, Diagnostics: out, Page: page, Truncation: trunc}
 }
 func Diagnostics(ctx context.Context, o Options) (Result, error) {
 	ws, sem, s, e := Analyze(ctx, o)

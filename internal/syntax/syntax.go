@@ -348,10 +348,18 @@ func splitLine(raw string) (string, string, int) {
 			commentIdx = i
 			break
 		}
+		if ch == '/' && i+1 < len(raw) && raw[i+1] == '/' && strings.TrimSpace(raw[:i]) == "" {
+			commentIdx = i
+			break
+		}
 	}
 
 	if commentIdx >= 0 {
-		return strings.TrimRight(raw[:commentIdx], " 	"), strings.TrimSpace(raw[commentIdx+1:]), commentIdx
+		delimiterLen := 1
+		if strings.HasPrefix(raw[commentIdx:], "//") {
+			delimiterLen = 2
+		}
+		return strings.TrimRight(raw[:commentIdx], " 	"), strings.TrimSpace(raw[commentIdx+delimiterLen:]), commentIdx
 	}
 
 	return strings.TrimRight(raw, " 	"), "", -1
