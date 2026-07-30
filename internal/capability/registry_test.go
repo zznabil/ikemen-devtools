@@ -8,7 +8,7 @@ import (
 func TestDefaultRegistryIsDeterministicAndTyped(t *testing.T) {
 	r := DefaultRegistry()
 	got := r.List()
-	if len(got) != 5 {
+	if len(got) != 21 {
 		t.Fatalf("capability count = %d", len(got))
 	}
 	for i := 1; i < len(got); i++ {

@@ -14,8 +14,24 @@ import (
 
 // LoadResult is the workspace output after resolving file references.
 type LoadResult struct {
-	Documents   []ir.Document
-	Diagnostics []ir.Diagnostic
+	Documents    []ir.Document
+	Diagnostics  []ir.Diagnostic
+	ConfigDigest string
+}
+
+// LoadWorkspaceConfigured resolves the root-scoped .ikm configuration before loading an entry point.
+func LoadWorkspaceConfigured(defPath string, flags ConfigFlags) (LoadResult, error) {
+	root, err := filepath.Abs(filepath.Dir(defPath))
+	if err != nil {
+		return LoadResult{}, err
+	}
+	cfg, err := ResolveConfig(root, flags)
+	if err != nil {
+		return LoadResult{}, err
+	}
+	result := LoadWorkspaceWithProfile(defPath, cfg.ProfileValue())
+	result.ConfigDigest = cfg.Digest()
+	return result, nil
 }
 
 // LoadWorkspace parses a character .def and resolves its [Files] section sources.

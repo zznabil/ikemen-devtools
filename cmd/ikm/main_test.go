@@ -604,3 +604,28 @@ func writeTextFile(t *testing.T, path, text string) {
 		t.Fatalf("write %q: %v", path, err)
 	}
 }
+func TestReadOnlyCLIGoldenParity(t *testing.T) {
+	root := t.TempDir()
+	def := filepath.Join(root, "hero.def")
+	writeTextFile(t, filepath.Join(root, "hero.st"), "[Statedef 100]\n")
+	writeTextFile(t, def, "[Files]\nst = hero.st\n")
+	for _, args := range [][]string{{"query", "symbols", "--root", def, "--json"}, {"query", "diagnostics", "--root", def, "--json"}, {"graph", "dependencies", "--root", def, "--json"}, {"inspect", "file", "--root", def, "--json"}, {"export", "jsonl", "--root", def, "--json"}, {"export", "scip", "--root", def, "--json"}, {"export", "sql", "--root", def, "--json"}} {
+		first, stderr, status := runCLI(t, args)
+		if status != 0 || stderr != "" {
+			t.Fatalf("%v status=%d stderr=%q", args, status, stderr)
+		}
+		second, _, _ := runCLI(t, args)
+		if first != second {
+			t.Fatalf("non-deterministic output for %v", args)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(first), &payload); err != nil {
+			t.Fatalf("invalid JSON for %v: %v", args, err)
+		}
+		for _, k := range []string{"schemaVersion", "operation", "status", "workspace", "snapshot", "result", "page", "truncated"} {
+			if _, ok := payload[k]; !ok {
+				t.Fatalf("missing %s for %v", k, args)
+			}
+		}
+	}
+}

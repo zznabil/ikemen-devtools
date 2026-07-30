@@ -1,0 +1,16 @@
+{
+  "version": "1.0.0",
+  "tolerance": {"linux": 0.20, "windows": 0.30, "darwin": 0.25},
+  "metrics": {
+    "coldScanMs": {"max": 30000},
+    "coldSemanticBuildMs": {"max": 60000},
+    "warmRefreshMs": {"max": 10000},
+    "indexedQueryP95Ms": {"max": 500},
+    "mcpOverheadMs": {"max": 100},
+    "peakRSSBytes": {"max": 1073741824},
+    "cacheBytes": {"max": 1073741824},
+    "cancellationMs": {"max": 1000}
+  },
+  "security": {"maxJSONDepth": 64, "maxMessageBytes": 1048576, "maxOutputItems": 10000, "maxGraphNodes": 10000},
+  "exceptionPolicy": "Threshold changes require maintainer rationale and review; baseline replacement is never implicit."
+}

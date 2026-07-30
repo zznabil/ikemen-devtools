@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 type Authority string
@@ -38,11 +39,13 @@ type Authorization struct {
 	Authority        Authority `json:"authority"`
 	RequiresApproval bool      `json:"requiresApproval,omitempty"`
 }
-
 type Schema struct {
-	Type       string         `json:"type"`
-	Properties map[string]any `json:"properties,omitempty"`
-	Required   []string       `json:"required,omitempty"`
+	Schema               string         `json:"$schema,omitempty"`
+	ID                   string         `json:"$id,omitempty"`
+	Type                 string         `json:"type"`
+	Properties           map[string]any `json:"properties,omitempty"`
+	Required             []string       `json:"required,omitempty"`
+	AdditionalProperties *bool          `json:"additionalProperties,omitempty"`
 }
 
 // Descriptor is the transport-neutral declaration shared by every adapter.
@@ -124,20 +127,21 @@ func positionSchema() Schema {
 	return Schema{Type: "object", Properties: map[string]any{"uri": map[string]any{"type": "string", "minLength": 1}, "line": map[string]any{"type": "integer", "minimum": 0}, "character": map[string]any{"type": "integer", "minimum": 0}}, Required: []string{"uri", "line", "character"}}
 }
 
-// DefaultRegistry declares the public read-only document operations currently
-// exposed by the adapters. Services provide their execution independently.
+// DefaultRegistry declares every read-only operation shared by CLI and MCP.
 func DefaultRegistry() *Registry {
 	r := NewRegistry()
 	doc := documentSchema()
 	pos := positionSchema()
-	for _, d := range []Descriptor{
-		{Name: "document_diagnostics", Description: "Return parser and semantic diagnostics for a preloaded IKEMEN document.", Authorization: Authorization{Authority: AuthorityRead}, Input: doc, Output: Schema{Type: "object"}, Budget: Budget{MaxItems: 1000}, Pagination: Pagination{}, Ordering: Ordering{Keys: []string{"path", "code"}, Stable: true}},
-		{Name: "document_symbols", Description: "Return stable symbols for a preloaded IKEMEN document.", Authorization: Authorization{Authority: AuthorityRead}, Input: doc, Output: Schema{Type: "object"}, Budget: Budget{MaxItems: 1000}, Pagination: Pagination{}, Ordering: Ordering{Keys: []string{"name", "kind", "line"}, Stable: true}},
-		{Name: "hover", Description: "Explain the symbol at an IKEMEN document position.", Authorization: Authorization{Authority: AuthorityRead}, Input: pos, Output: Schema{Type: "object"}, Budget: Budget{MaxBytes: 65536}, Pagination: Pagination{}, Ordering: Ordering{Keys: []string{"uri", "line", "character"}, Stable: true}},
-		{Name: "definition", Description: "Find the definition at an IKEMEN document position.", Authorization: Authorization{Authority: AuthorityRead}, Input: pos, Output: Schema{Type: "object"}, Budget: Budget{MaxItems: 1000}, Pagination: Pagination{}, Ordering: Ordering{Keys: []string{"uri", "line", "character"}, Stable: true}},
-		{Name: "references", Description: "Find references at an IKEMEN document position.", Authorization: Authorization{Authority: AuthorityRead}, Input: pos, Output: Schema{Type: "object"}, Budget: Budget{MaxItems: 1000}, Pagination: Pagination{Supported: true, DefaultSize: 100, MaximumSize: 1000}, Ordering: Ordering{Keys: []string{"uri", "line", "character"}, Stable: true}},
-	} {
-		_ = r.Register(d)
+	names := []string{"document_diagnostics", "document_symbols", "hover", "definition", "references", "workspace_status", "diagnostics", "symbols", "search", "graph_dependencies", "graph_dependents", "graph_path", "graph_impact", "edge_explain", "inspect_workspace", "inspect_character", "inspect_stage", "inspect_file", "export_jsonl", "export_scip", "export_sql"}
+	for _, name := range names {
+		input := doc
+		if strings.Contains(name, "search") || strings.Contains(name, "graph") || strings.Contains(name, "inspect") || strings.Contains(name, "export") {
+			input = Schema{Type: "object", Properties: map[string]any{"root": map[string]any{"type": "string", "minLength": 1}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}, "cursor": map[string]any{"type": "string"}}, Required: []string{"root"}}
+		}
+		if name == "hover" || name == "definition" {
+			input = pos
+		}
+		_ = r.Register(Descriptor{Name: name, Description: "Read-only IKEMEN workspace operation.", Authorization: Authorization{Authority: AuthorityRead}, Input: input, Output: Schema{Type: "object", Properties: map[string]any{"schemaVersion": map[string]any{"type": "string"}, "operation": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "result": map[string]any{"type": "object"}}}, Budget: Budget{MaxItems: 1000, MaxBytes: 1048576, MaxDuration: "30s"}, Pagination: Pagination{Supported: true, DefaultSize: 100, MaximumSize: 1000}, Ordering: Ordering{Keys: []string{"path", "name", "id"}, Stable: true}})
 	}
 	return r
 }

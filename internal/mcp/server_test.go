@@ -3,8 +3,15 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/ikemen-engine/ikemen-devtools/internal/ir"
+	"github.com/ikemen-engine/ikemen-devtools/internal/patch"
 )
 
 func TestHandleMCPInitializeAndTools(t *testing.T) {
@@ -200,5 +207,141 @@ func TestBatchAndRequestErrorClasses(t *testing.T) {
 	response := s.Handle(context.Background(), []byte(`{"jsonrpc":"2.0","id":null,"method":"ping"}`))
 	if response == nil || response.Error != nil {
 		t.Fatalf("explicit null id must remain a request: %#v", response)
+	}
+}
+func TestResourcesListReadAndTemplates(t *testing.T) {
+	s := NewServer()
+	for _, method := range []string{"resources/list", "resources/templates/list"} {
+		r := s.Handle(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"`+method+`","params":{}}`))
+		if r.Error != nil {
+			t.Fatal(method, r.Error)
+		}
+	}
+	r := s.Handle(context.Background(), []byte(`{"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"ikm://workspace"}}`))
+	if r.Error != nil {
+		t.Fatal(r.Error)
+	}
+	bad := s.Handle(context.Background(), []byte(`{"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"ikm://file/../../outside"}}`))
+	if bad.Error == nil || bad.Error.Code != -32602 {
+		t.Fatalf("expected invalid resource URI: %#v", bad)
+	}
+}
+
+func TestReadOnlyRegistryParityAndSchemas(t *testing.T) {
+	s := NewServer()
+	r := s.Handle(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	if r.Error != nil {
+		t.Fatal(r.Error)
+	}
+	raw, _ := json.Marshal(r.Result)
+	for _, name := range []string{"diagnostics", "symbols", "search", "graph_impact", "inspect_workspace", "export_jsonl"} {
+		if !bytes.Contains(raw, []byte(name)) {
+			t.Fatalf("missing registry operation %s", name)
+		}
+	}
+}
+func TestCompiledParityTranscriptShape(t *testing.T) {
+	s := NewServer()
+	var in, out bytes.Buffer
+	in.WriteString(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}` + "\n")
+	in.WriteString(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}` + "\n")
+	if err := s.Serve(context.Background(), &in, &out); err != nil {
+		t.Fatal(err)
+	}
+	lines := bytes.Split(bytes.TrimSpace(out.Bytes()), []byte("\n"))
+	if len(lines) != 2 {
+		t.Fatalf("transcript lines=%d", len(lines))
+	}
+	for _, line := range lines {
+		var v map[string]any
+		if json.Unmarshal(line, &v) != nil || v["jsonrpc"] != "2.0" {
+			t.Fatalf("invalid transcript %s", line)
+		}
+	}
+}
+func TestServerRootContainmentAndWritePolicy(t *testing.T) {
+	s := NewServerWithRoot(t.TempDir())
+	if err := s.SetDocument(context.Background(), "../outside.cmd", nil); err == nil {
+		t.Fatal("expected root escape refusal")
+	}
+	if raw, _ := json.Marshal(NewServer().toolDefinitions()); bytes.Contains(raw, []byte("patch_apply")) {
+		t.Fatal("mutation tools must be absent by default")
+	}
+	if raw, _ := json.Marshal(NewServerWithPolicy("1", true).toolDefinitions()); !bytes.Contains(raw, []byte("patch_apply")) {
+		t.Fatal("write-enabled server must advertise patch_apply")
+	}
+}
+
+func TestMCPMutationLifecycle(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	path := filepath.Join(root, "hero.cmd")
+	source := []byte("hello\n")
+	if err := os.WriteFile(path, source, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(source)
+	plan := patch.PatchPlan{
+		Version: patch.PlanVersion, WorkspaceRoot: root, InputSnapshot: "snap-1",
+		Edits: []patch.Edit{{Path: "hero.cmd", ContentHash: hex.EncodeToString(sum[:]), IdentityContract: ir.IdentityContractVersion, Span: patch.Span{ByteStart: 0, ByteEnd: 5}, OldText: "hello", NewText: "world"}},
+	}
+	s := NewServerWithPolicy("1", true)
+	if err := s.SetRoot(root); err != nil {
+		t.Fatal(err)
+	}
+	call := func(id int, name string, args map[string]interface{}) *Response {
+		body, _ := json.Marshal(map[string]interface{}{"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": map[string]interface{}{"name": name, "arguments": args}})
+		return s.Handle(ctx, body)
+	}
+	preview := call(1, "patch_preview", map[string]interface{}{"plan": plan})
+	if preview.Error != nil {
+		t.Fatal(preview.Error)
+	}
+	if got, _ := os.ReadFile(path); string(got) != string(source) {
+		t.Fatalf("preview mutated file: %q", got)
+	}
+	result := preview.Result.(map[string]interface{})
+	token, ok := result["token"].(string)
+	if !ok || token == "" {
+		t.Fatalf("preview token missing: %#v", result)
+	}
+	stale := plan
+	stale.InputSnapshot = "snap-old"
+	if resp := call(2, "patch_apply", map[string]interface{}{"plan": stale, "token": token}); resp.Error == nil {
+		t.Fatal("stale apply must be refused")
+	}
+	applied := call(3, "patch_apply", map[string]interface{}{"plan": plan, "token": token})
+	if applied.Error != nil {
+		t.Fatal(applied.Error)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "world\n" {
+		t.Fatalf("atomic apply result %q", got)
+	}
+	if resp := call(4, "patch_apply", map[string]interface{}{"plan": plan, "token": token}); resp.Error == nil {
+		t.Fatal("mutation token must be single-use")
+	}
+	if resp := call(5, "rename_prepare", map[string]interface{}{}); resp.Error == nil {
+		t.Fatal("ambiguous/unavailable mutation provider must refuse")
+	}
+}
+
+func TestConcurrentServeFramesRemainParseable(t *testing.T) {
+	s := NewServer()
+	var in, out bytes.Buffer
+	for range 8 {
+		in.WriteString(`{"jsonrpc":"2.0","id":1,"method":"ping"}` + "\n")
+	}
+	if err := s.Serve(context.Background(), &in, &out); err != nil {
+		t.Fatal(err)
+	}
+	for out.Len() > 0 {
+		frame, err := ReadFrame(&out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var v map[string]any
+		if json.Unmarshal(frame, &v) != nil || v["jsonrpc"] != "2.0" {
+			t.Fatalf("invalid response %s", frame)
+		}
 	}
 }

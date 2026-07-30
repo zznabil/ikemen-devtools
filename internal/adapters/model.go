@@ -47,6 +47,7 @@ type ZSSDocument struct {
 	Comments     []Comment
 	Dependencies []Dependency
 	Diagnostics  []Diagnostic
+	Completeness Completeness
 }
 
 type LuaFunction struct {
@@ -59,4 +60,11 @@ type LuaDocument struct {
 	Comments     []Comment
 	Dependencies []Dependency
 	Diagnostics  []Diagnostic
+	Completeness Completeness
+}
+
+// Completeness records the bounded subset understood by an adapter.
+type Completeness struct {
+	Complete    bool
+	Unsupported []string
 }

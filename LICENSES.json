@@ -1,0 +1,9 @@
+{
+  "format": "license-inventory-v1",
+  "project": "github.com/ikemen-engine/ikemen-devtools",
+  "entries": [
+    {"module": "github.com/ikemen-engine/ikemen-devtools", "license": "MIT", "notice": "LICENSE"},
+    {"module": "modernc.org/sqlite", "version": "v1.54.0", "license": "BSD-3-Clause", "notice": "go.sum/module metadata"},
+    {"module": "generated dependencies", "license": "see SPDX SBOM", "notice": "release artifact"}
+  ]
+}

@@ -254,6 +254,8 @@ type Correlation struct {
 	DocumentPath string
 	Identity     ir.Identity
 	SymbolID     string
+	EdgeID       string
+	SourceSpan   ir.SourceSpan
 }
 
 // Correlate resolves event paths and identities against workspace documents deterministically.
@@ -299,4 +301,31 @@ func identityMatches(a, b ir.Identity) bool {
 		return true
 	}
 	return (a.SemanticKey == "" || a.SemanticKey == b.SemanticKey) && (a.OccurrenceID == "" || a.OccurrenceID == b.OccurrenceID) && (a.StoreID == "" || a.StoreID == b.StoreID)
+}
+
+// Service is the guarded runtime-trace seam used by CLI frontends.
+// It deliberately does not expose process execution policy; callers must provide
+// an already-authorized Bridge and disposable Config.
+type Service struct{ Bridge *Bridge }
+
+func NewService(bridge *Bridge) *Service {
+	if bridge == nil {
+		bridge = NewBridge(nil, nil)
+	}
+	return &Service{Bridge: bridge}
+}
+func (s *Service) Check(ctx context.Context, cfg Config) (Result, error) {
+	if s == nil || s.Bridge == nil {
+		return Result{}, errors.New("trace service unavailable")
+	}
+	return s.Bridge.Run(ctx, cfg)
+}
+func (s *Service) Explain(result Result) string {
+	if result.ExitCode != 0 {
+		return fmt.Sprintf("runtime exited with status %d after %d loader events", result.ExitCode, len(result.Events))
+	}
+	if len(result.ParseErrors) > 0 {
+		return fmt.Sprintf("runtime produced %d malformed trace lines", len(result.ParseErrors))
+	}
+	return fmt.Sprintf("runtime completed with %d loader events", len(result.Events))
 }

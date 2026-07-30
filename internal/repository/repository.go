@@ -219,6 +219,48 @@ func (r *Repository) UpsertDocumentSnapshot(ctx context.Context, snapshot Docume
 	return nil
 }
 
+// DeleteDocumentSnapshot removes a document and all dependent semantic rows atomically.
+func (r *Repository) DeleteDocumentSnapshot(ctx context.Context, path string) error {
+	if r == nil || r.db == nil {
+		return ErrNilDatabase
+	}
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	path = canonicalizePath(path)
+	if path == "" {
+		return ErrEmptyPath
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	for _, table := range []string{referenceTable, symbolTable, diagnosticTable, dependencyEdgeTable} {
+		column := "document_path"
+		if table == diagnosticTable {
+			column = "path"
+		}
+		if table == dependencyEdgeTable {
+			column = "source_path"
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE "+column+" = ?", path); err != nil {
+			return err
+		}
+		if table == dependencyEdgeTable {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE target_path = ?", path); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM "+documentTable+" WHERE path = ?", path); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
+}
+
 // ReadDocumentSnapshot returns one snapshot and all semantic rows for a document path.
 func (r *Repository) ReadDocumentSnapshot(ctx context.Context, path string) (DocumentSnapshot, error) {
 	if r == nil || r.db == nil {
@@ -602,7 +644,6 @@ func currentUnix() int64 {
 }
 
 func upsertDocument(ctx context.Context, tx *sql.Tx, snapshot DocumentSnapshot) error {
-	fmt.Printf("upsertDocument path=%q\n", snapshot.Path)
 	doc := normalizeSnapshot(snapshot)
 	if ctxErr(ctx) != nil {
 		return ctxErr(ctx)
