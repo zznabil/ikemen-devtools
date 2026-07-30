@@ -35,6 +35,24 @@ type Error struct {
 	Data    interface{} `json:"data,omitempty"`
 }
 
+// MarshalJSON enforces JSON-RPC response exclusivity: a response has either
+// result or error, never both. A nil successful result is still encoded as
+// "result":null (for example, shutdown).
+func (r Response) MarshalJSON() ([]byte, error) {
+	if r.Error != nil {
+		return json.Marshal(struct {
+			JSONRPC string      `json:"jsonrpc"`
+			ID      interface{} `json:"id"`
+			Error   *Error      `json:"error"`
+		}{JSONRPC: r.JSONRPC, ID: r.ID, Error: r.Error})
+	}
+	return json.Marshal(struct {
+		JSONRPC string      `json:"jsonrpc"`
+		ID      interface{} `json:"id"`
+		Result  interface{} `json:"result"`
+	}{JSONRPC: r.JSONRPC, ID: r.ID, Result: r.Result})
+}
+
 // ReadFrame reads one LSP Content-Length framed JSON message.
 func ReadFrame(r io.Reader) ([]byte, error) {
 	br, ok := r.(*bufio.Reader)
@@ -94,14 +112,17 @@ func decodeRequest(body []byte) (Request, error) {
 }
 
 func rawID(raw json.RawMessage) interface{} {
-	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 		return nil
 	}
-	var v interface{}
-	if json.Unmarshal(raw, &v) != nil {
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.UseNumber()
+	var value interface{}
+	if decoder.Decode(&value) != nil {
 		return nil
 	}
-	return v
+	return value
 }
 
 func isNotification(raw json.RawMessage) bool {

@@ -10,6 +10,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/ikemen-engine/ikemen-devtools/internal/capability"
 	"github.com/ikemen-engine/ikemen-devtools/internal/lsp"
 )
 
@@ -26,13 +27,24 @@ type Request struct {
 	Params  json.RawMessage `json:"params"`
 }
 
+const (
+	modernProtocolVersion  = "2026-07-28"
+	protocolVersionMeta    = "io.modelcontextprotocol/protocolVersion"
+	clientInfoMeta         = "io.modelcontextprotocol/clientInfo"
+	clientCapabilitiesMeta = "io.modelcontextprotocol/clientCapabilities"
+	serverInfoMeta         = "io.modelcontextprotocol/serverInfo"
+)
+
+var legacyProtocolVersions = []string{"2025-11-25", "2025-06-18", "2024-11-05"}
+
 type Response = lsp.Response
 type Error = lsp.Error
 
 // Server is an in-process, read-only MCP facade over the semantic LSP server.
 type Server struct {
-	lsp     *lsp.Server
-	version string
+	lsp      *lsp.Server
+	version  string
+	registry *capability.Registry
 }
 
 func NewServer() *Server { return NewServerWithVersion("0.0.0-dev") }
@@ -41,7 +53,7 @@ func NewServerWithVersion(version string) *Server {
 	if strings.TrimSpace(version) == "" {
 		version = "0.0.0-dev"
 	}
-	return &Server{lsp: lsp.NewServer(), version: version}
+	return &Server{lsp: lsp.NewServer(), version: version, registry: capability.DefaultRegistry()}
 }
 
 // SetDocument supplies an in-memory document; it never reads or writes disk.
@@ -94,7 +106,7 @@ func WriteFrame(w io.Writer, body []byte) error {
 	return nil
 }
 
-// Serve processes newline-delimited requests until EOF or cancellation.
+// Serve processes newline-delimited requests and JSON-RPC batches until EOF.
 func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 	br := bufio.NewReader(r)
 	for {
@@ -107,6 +119,28 @@ func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 		}
 		if err != nil {
 			return err
+		}
+		var value interface{}
+		if err := json.Unmarshal(body, &value); err != nil {
+			encoded, _ := json.Marshal(errorResponse(nil, -32700, "parse error"))
+			if err := WriteFrame(w, encoded); err != nil {
+				return err
+			}
+			continue
+		}
+		if batch, ok := value.([]interface{}); ok {
+			responses := s.handleBatch(ctx, body, len(batch))
+			if len(responses) == 0 {
+				continue
+			}
+			encoded, err := json.Marshal(responses)
+			if err != nil {
+				return err
+			}
+			if err := WriteFrame(w, encoded); err != nil {
+				return err
+			}
+			continue
 		}
 		resp := s.Handle(ctx, body)
 		if resp == nil {
@@ -122,48 +156,92 @@ func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 	}
 }
 
-// Handle dispatches one request. Malformed input always returns a parse error.
-func (s *Server) Handle(ctx context.Context, body []byte) *Response {
-	if s == nil || s.lsp == nil {
-		return errorResponse(nil, -32603, "server unavailable")
+func (s *Server) handleBatch(ctx context.Context, body []byte, count int) []*Response {
+	if count == 0 {
+		return []*Response{errorResponse(nil, -32600, "invalid request")}
 	}
-	var req Request
-	if err := json.Unmarshal(body, &req); err != nil || req.JSONRPC != "2.0" || req.Method == "" {
+	var items []json.RawMessage
+	if err := json.Unmarshal(body, &items); err != nil {
+		return []*Response{errorResponse(nil, -32600, "invalid request")}
+	}
+	responses := make([]*Response, 0, len(items))
+	for _, item := range items {
+		if response := s.Handle(ctx, item); response != nil {
+			responses = append(responses, response)
+		}
+	}
+	return responses
+}
+
+// Handle dispatches one request. Parse and request-shape failures are distinct.
+func (s *Server) Handle(ctx context.Context, body []byte) (response *Response) {
+	defer func() {
+		if recover() != nil {
+			response = errorResponse(nil, -32603, "internal error")
+		}
+	}()
+	if s == nil || s.lsp == nil {
+		return errorResponse(nil, -32603, "internal error")
+	}
+	var value interface{}
+	if err := json.Unmarshal(body, &value); err != nil {
 		return errorResponse(nil, -32700, "parse error")
 	}
-	id := rawID(req.ID)
-	if len(bytes.TrimSpace(req.ID)) == 0 {
-		return nil
+	if _, ok := value.(map[string]interface{}); !ok {
+		return errorResponse(nil, -32600, "invalid request")
 	}
+	var req Request
+	if err := json.Unmarshal(body, &req); err != nil {
+		return errorResponse(nil, -32600, "invalid request")
+	}
+	if req.JSONRPC != "2.0" || req.Method == "" {
+		return errorResponse(nil, -32600, "invalid request")
+	}
+	notification := len(bytes.TrimSpace(req.ID)) == 0
+	id := rawID(req.ID)
 	if err := ctx.Err(); err != nil {
+		if notification {
+			return nil
+		}
 		return errorResponse(id, -32800, "request cancelled")
+	}
+	if req.Method != "initialize" {
+		if err := validateModernRequest(req); err != nil {
+			if notification {
+				return nil
+			}
+			return errorResponse(id, err.Code, err.Message, err.Data)
+		}
+	}
+	if notification {
+		return nil
 	}
 	switch req.Method {
 	case "initialize":
-		protocolVersion := negotiateLegacyVersion(req.Params)
-		return &Response{JSONRPC: "2.0", ID: id, Result: map[string]interface{}{
-			"protocolVersion": protocolVersion,
-			"capabilities":    map[string]interface{}{"tools": map[string]interface{}{}},
-			"serverInfo":      serverInfo(s.version),
-		}}
+		result, initErr := legacyInitializeResult(req.Params, s.version)
+		if initErr != nil {
+			return errorResponse(id, initErr.Code, initErr.Message, initErr.Data)
+		}
+		return &Response{JSONRPC: "2.0", ID: id, Result: result}
 	case "server/discover":
 		return &Response{JSONRPC: "2.0", ID: id, Result: map[string]interface{}{
 			"resultType":        "complete",
 			"supportedVersions": append([]string(nil), supportedProtocolVersions...),
-			"capabilities":      map[string]interface{}{"tools": map[string]interface{}{}},
-			"serverInfo":        serverInfo(s.version),
+			"capabilities":      s.toolCapabilities(),
+			"_meta":             map[string]interface{}{serverInfoMeta: serverInfo(s.version)},
 			"instructions":      "Use tools/list, then tools/call. Documents must be explicitly preloaded by the host.",
+			"ttlMs":             0,
+			"cacheScope":        "public",
 		}}
 	case "ping":
 		return &Response{JSONRPC: "2.0", ID: id, Result: map[string]interface{}{}}
 	case "tools/list":
-		return &Response{JSONRPC: "2.0", ID: id, Result: map[string]interface{}{"tools": toolDefinitions()}}
+		return &Response{JSONRPC: "2.0", ID: id, Result: map[string]interface{}{"tools": s.toolDefinitions()}}
 	case "tools/call":
 		return s.toolCall(ctx, id, req.Params)
 	case "shutdown":
 		return &Response{JSONRPC: "2.0", ID: id, Result: nil}
-	case "textDocument/diagnostic", "textDocument/documentSymbol", "textDocument/hover", "textDocument/definition", "textDocument/references",
-		"document/diagnostics", "document/symbols", "document/hover", "document/definition", "document/references":
+	case "textDocument/diagnostic", "textDocument/documentSymbol", "textDocument/hover", "textDocument/definition", "textDocument/references", "document/diagnostics", "document/symbols", "document/hover", "document/definition", "document/references":
 		if strings.HasPrefix(req.Method, "document/") {
 			req.Method = map[string]string{"document/diagnostics": "textDocument/diagnostic", "document/symbols": "textDocument/documentSymbol", "document/hover": "textDocument/hover", "document/definition": "textDocument/definition", "document/references": "textDocument/references"}[req.Method]
 			body, _ = json.Marshal(Request{JSONRPC: req.JSONRPC, ID: req.ID, Method: req.Method, Params: req.Params})
@@ -239,30 +317,28 @@ func toolParams(method string, args map[string]interface{}) ([]byte, error) {
 	return json.Marshal(args)
 }
 
-func toolDefinitions() []map[string]interface{} {
-	documentSchema := map[string]interface{}{
-		"type":                 "object",
-		"additionalProperties": false,
-		"properties":           map[string]interface{}{"uri": map[string]interface{}{"type": "string", "minLength": 1}},
-		"required":             []string{"uri"},
+func (s *Server) toolDefinitions() []map[string]interface{} {
+	if s == nil || s.registry == nil {
+		return nil
 	}
-	positionSchema := map[string]interface{}{
-		"type":                 "object",
-		"additionalProperties": false,
-		"properties": map[string]interface{}{
-			"uri":       map[string]interface{}{"type": "string", "minLength": 1},
-			"line":      map[string]interface{}{"type": "integer", "minimum": 0},
-			"character": map[string]interface{}{"type": "integer", "minimum": 0},
-		},
-		"required": []string{"uri", "line", "character"},
+	bindings := s.registry.MCPDefinitions(capability.Availability{Read: true})
+	out := make([]map[string]interface{}, 0, len(bindings))
+	for _, binding := range bindings {
+		out = append(out, map[string]interface{}{
+			"name":         binding.Name,
+			"description":  binding.Description,
+			"inputSchema":  binding.InputSchema,
+			"outputSchema": binding.OutputSchema,
+		})
 	}
-	return []map[string]interface{}{
-		{"name": "document_diagnostics", "description": "Return parser and semantic diagnostics for a preloaded IKEMEN document.", "inputSchema": documentSchema},
-		{"name": "document_symbols", "description": "Return stable symbols for a preloaded IKEMEN document.", "inputSchema": documentSchema},
-		{"name": "hover", "description": "Explain the symbol at an IKEMEN document position.", "inputSchema": positionSchema},
-		{"name": "definition", "description": "Find the definition at an IKEMEN document position.", "inputSchema": positionSchema},
-		{"name": "references", "description": "Find references at an IKEMEN document position.", "inputSchema": positionSchema},
+	return out
+}
+
+func (s *Server) toolCapabilities() map[string]interface{} {
+	if len(s.toolDefinitions()) == 0 {
+		return map[string]interface{}{}
 	}
+	return map[string]interface{}{"tools": map[string]interface{}{}}
 }
 
 func nonNegativeInteger(value interface{}) (int, bool) {
@@ -272,34 +348,111 @@ func nonNegativeInteger(value interface{}) (int, bool) {
 	}
 	return int(number), true
 }
-
-func negotiateLegacyVersion(raw json.RawMessage) string {
-	var params struct {
-		ProtocolVersion string `json:"protocolVersion"`
+func validateModernRequest(req Request) *Error {
+	var params map[string]json.RawMessage
+	if len(bytes.TrimSpace(req.Params)) == 0 || json.Unmarshal(req.Params, &params) != nil || params == nil {
+		if req.Method == "server/discover" {
+			return &Error{Code: -32602, Message: "missing request metadata"}
+		}
+		return nil
 	}
-	_ = json.Unmarshal(raw, &params)
-	for _, supported := range supportedProtocolVersions[1:] {
-		if params.ProtocolVersion == supported {
-			return supported
+	var meta map[string]json.RawMessage
+	rawMeta, ok := params["_meta"]
+	if !ok {
+		if req.Method == "server/discover" {
+			return &Error{Code: -32602, Message: "missing request metadata"}
+		}
+		return nil
+	}
+	if json.Unmarshal(rawMeta, &meta) != nil || meta == nil {
+		return &Error{Code: -32602, Message: "missing request metadata"}
+	}
+	var protocolVersion string
+	if json.Unmarshal(meta[protocolVersionMeta], &protocolVersion) != nil || protocolVersion == "" {
+		return &Error{Code: -32602, Message: "missing protocol version metadata"}
+	}
+	if protocolVersion != modernProtocolVersion {
+		return &Error{
+			Code:    -32022,
+			Message: "Unsupported protocol version",
+			Data: map[string]interface{}{
+				"supported": append([]string(nil), supportedProtocolVersions...),
+				"requested": protocolVersion,
+			},
 		}
 	}
-	return supportedProtocolVersions[1]
+	var clientInfo map[string]interface{}
+	if json.Unmarshal(meta[clientInfoMeta], &clientInfo) != nil || clientInfo == nil || nonEmptyString(clientInfo["name"]) == "" || nonEmptyString(clientInfo["version"]) == "" {
+		return &Error{Code: -32602, Message: "missing client info metadata"}
+	}
+	var clientCapabilities map[string]interface{}
+	if json.Unmarshal(meta[clientCapabilitiesMeta], &clientCapabilities) != nil || clientCapabilities == nil {
+		return &Error{Code: -32602, Message: "missing client capabilities metadata"}
+	}
+	if req.Method == "server/discover" {
+		for key := range params {
+			if key != "_meta" {
+				return &Error{Code: -32602, Message: "server/discover accepts only _meta"}
+			}
+		}
+	}
+	return nil
+}
+
+func nonEmptyString(value interface{}) string {
+	text, _ := value.(string)
+	return strings.TrimSpace(text)
+}
+
+func legacyInitializeResult(raw json.RawMessage, version string) (map[string]interface{}, *Error) {
+	var params map[string]json.RawMessage
+	if len(bytes.TrimSpace(raw)) == 0 || json.Unmarshal(raw, &params) != nil || params == nil {
+		return nil, &Error{Code: -32602, Message: "invalid initialize params"}
+	}
+	var requested string
+	if json.Unmarshal(params["protocolVersion"], &requested) != nil || requested == "" {
+		return nil, &Error{Code: -32602, Message: "missing protocol version"}
+	}
+	for _, supported := range legacyProtocolVersions {
+		if requested == supported {
+			return map[string]interface{}{
+				"protocolVersion": requested,
+				"capabilities":    map[string]interface{}{"tools": map[string]interface{}{}},
+				"serverInfo":      serverInfo(version),
+			}, nil
+		}
+	}
+	return nil, &Error{
+		Code:    -32022,
+		Message: "Unsupported protocol version",
+		Data: map[string]interface{}{
+			"supported": append([]string(nil), legacyProtocolVersions...),
+			"requested": requested,
+		},
+	}
 }
 
 func serverInfo(version string) map[string]interface{} {
 	return map[string]interface{}{"name": "ikemen-devtools", "version": version}
 }
 
-func errorResponse(id interface{}, code int, message string) *Response {
-	return &Response{JSONRPC: "2.0", ID: id, Error: &Error{Code: code, Message: message}}
+func errorResponse(id interface{}, code int, message string, data ...interface{}) *Response {
+	var detail interface{}
+	if len(data) > 0 {
+		detail = data[0]
+	}
+	return &Response{JSONRPC: "2.0", ID: id, Error: &Error{Code: code, Message: message, Data: detail}}
 }
 
 func rawID(raw json.RawMessage) interface{} {
-	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 		return nil
 	}
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.UseNumber()
 	var value interface{}
-	if json.Unmarshal(raw, &value) != nil {
+	if decoder.Decode(&value) != nil {
 		return nil
 	}
 	return value

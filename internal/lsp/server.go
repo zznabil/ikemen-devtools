@@ -60,7 +60,7 @@ func (s *Server) RemoveDocument(pathOrURI string) {
 	s.mu.Unlock()
 }
 
-// Serve processes framed JSON-RPC messages until EOF or cancellation.
+// Serve processes framed JSON-RPC messages and batches until EOF or cancellation.
 func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 	br := bufio.NewReader(r)
 	for {
@@ -73,6 +73,44 @@ func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 		}
 		if err != nil {
 			return err
+		}
+		var value interface{}
+		if err := json.Unmarshal(body, &value); err != nil {
+			encoded, _ := encodeFrame(&Response{JSONRPC: "2.0", ID: nil, Error: &Error{Code: -32700, Message: "parse error"}})
+			if err := WriteFrame(w, encoded); err != nil {
+				return err
+			}
+			continue
+		}
+		if items, ok := value.([]interface{}); ok {
+			if len(items) == 0 {
+				encoded, _ := encodeFrame(&Response{JSONRPC: "2.0", ID: nil, Error: &Error{Code: -32600, Message: "invalid request"}})
+				if err := WriteFrame(w, encoded); err != nil {
+					return err
+				}
+				continue
+			}
+			var rawItems []json.RawMessage
+			if err := json.Unmarshal(body, &rawItems); err != nil {
+				return err
+			}
+			responses := make([]*Response, 0, len(rawItems))
+			for _, item := range rawItems {
+				if response := s.Handle(ctx, item); response != nil {
+					responses = append(responses, response)
+				}
+			}
+			if len(responses) == 0 {
+				continue
+			}
+			encoded, err := encodeFrame(responses)
+			if err != nil {
+				return err
+			}
+			if err := WriteFrame(w, encoded); err != nil {
+				return err
+			}
+			continue
 		}
 		resp := s.Handle(ctx, body)
 		if resp == nil {
@@ -89,14 +127,25 @@ func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 }
 
 // Handle decodes and dispatches one JSON-RPC request, returning a response.
-// Malformed requests receive a parse error with a null id rather than panicking.
-func (s *Server) Handle(ctx context.Context, body []byte) *Response {
+func (s *Server) Handle(ctx context.Context, body []byte) (response *Response) {
+	defer func() {
+		if recover() != nil {
+			response = &Response{JSONRPC: "2.0", ID: nil, Error: &Error{Code: -32603, Message: "internal error"}}
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return &Response{JSONRPC: "2.0", ID: nil, Error: &Error{Code: -32800, Message: "request cancelled"}}
 	}
+	var value interface{}
+	if err := json.Unmarshal(body, &value); err != nil {
+		return &Response{JSONRPC: "2.0", ID: nil, Error: &Error{Code: -32700, Message: "parse error"}}
+	}
+	if _, ok := value.(map[string]interface{}); !ok {
+		return &Response{JSONRPC: "2.0", ID: nil, Error: &Error{Code: -32600, Message: "invalid request"}}
+	}
 	req, err := decodeRequest(body)
 	if err != nil {
-		return &Response{JSONRPC: "2.0", ID: nil, Error: &Error{Code: -32700, Message: "parse error"}}
+		return &Response{JSONRPC: "2.0", ID: nil, Error: &Error{Code: -32600, Message: "invalid request"}}
 	}
 	id := rawID(req.ID)
 	if isNotification(req.ID) {

@@ -92,7 +92,7 @@ func TestServeFramedJSONRPC(t *testing.T) {
 
 func TestServerDiscoverAndNotificationBehavior(t *testing.T) {
 	s := NewServerWithVersion("1.2.3")
-	resp := s.Handle(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}`))
+	resp := s.Handle(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}`))
 	if resp == nil || resp.Error != nil {
 		t.Fatalf("discover response %#v", resp)
 	}
@@ -142,5 +142,63 @@ func TestNullIDIsStillARequest(t *testing.T) {
 	response := NewServer().Handle(context.Background(), []byte(`{"jsonrpc":"2.0","id":null,"method":"ping"}`))
 	if response == nil || response.Error != nil {
 		t.Fatalf("null-id request was treated as a notification: %#v", response)
+	}
+}
+
+func TestBatchRequestsAndResponseExclusivity(t *testing.T) {
+	s := NewServer()
+	var in, out bytes.Buffer
+	body := `[{"jsonrpc":"2.0","id":"a","method":"ping"},{"jsonrpc":"2.0","id":null,"method":"ping"},{"jsonrpc":"2.0","method":"initialized"},{"jsonrpc":"2.0","id":9007199254740993,"method":"missing"}]`
+	if err := WriteFrame(&in, []byte(body)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Serve(context.Background(), &in, &out); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := ReadFrame(&out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var responses []json.RawMessage
+	if err := json.Unmarshal(frame, &responses); err != nil || len(responses) != 3 {
+		t.Fatalf("unexpected batch responses: %s", frame)
+	}
+	for _, raw := range responses {
+		var shape map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &shape); err != nil {
+			t.Fatal(err)
+		}
+		_, hasResult := shape["result"]
+		_, hasError := shape["error"]
+		if hasResult == hasError {
+			t.Fatalf("response must contain exactly one of result/error: %s", raw)
+		}
+	}
+	if !bytes.Contains(responses[2], []byte(`"id":9007199254740993`)) {
+		t.Fatalf("numeric request id was not preserved: %s", responses[2])
+	}
+}
+
+func TestBatchAndRequestErrorClasses(t *testing.T) {
+	s := NewServer()
+	tests := []struct {
+		name string
+		body string
+		code int
+	}{
+		{"parse", `{`, -32700},
+		{"invalid request", `{}`, -32600},
+		{"method not found", `{"jsonrpc":"2.0","id":1,"method":"missing"}`, -32601},
+		{"invalid params", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":[]}`, -32602},
+	}
+	for _, test := range tests {
+		response := s.Handle(context.Background(), []byte(test.body))
+		if response == nil || response.Error == nil || response.Error.Code != test.code || response.Result != nil {
+			t.Errorf("%s response = %#v", test.name, response)
+		}
+	}
+	response := s.Handle(context.Background(), []byte(`{"jsonrpc":"2.0","id":null,"method":"ping"}`))
+	if response == nil || response.Error != nil {
+		t.Fatalf("explicit null id must remain a request: %#v", response)
 	}
 }
