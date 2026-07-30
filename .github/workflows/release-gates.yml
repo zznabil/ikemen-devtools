@@ -11,15 +11,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: _upstream/ikemen-devtools/go.mod
+          go-version-file: go.mod
       - name: Security and bounded-input gates
-        working-directory: _upstream/ikemen-devtools
         run: |
           go test ./internal/workspace ./internal/repository ./internal/contract ./internal/conformance
           go test -race ./internal/service ./internal/mcp ./internal/repository
       - name: Benchmark gate (deterministic fixtures)
-        working-directory: _upstream/ikemen-devtools
         run: go test -run '^$' -bench . ./internal/corpus ./internal/repository
       - name: Dependency vulnerability gate
-        working-directory: _upstream/ikemen-devtools
         run: go list -m -json all > /tmp/modules.json
