@@ -14,8 +14,24 @@ import (
 
 // LoadResult is the workspace output after resolving file references.
 type LoadResult struct {
-	Documents   []ir.Document
-	Diagnostics []ir.Diagnostic
+	Documents    []ir.Document
+	Diagnostics  []ir.Diagnostic
+	ConfigDigest string
+}
+
+// LoadWorkspaceConfigured resolves the root-scoped .ikm configuration before loading an entry point.
+func LoadWorkspaceConfigured(defPath string, flags ConfigFlags) (LoadResult, error) {
+	root, err := filepath.Abs(filepath.Dir(defPath))
+	if err != nil {
+		return LoadResult{}, err
+	}
+	cfg, err := ResolveConfig(root, flags)
+	if err != nil {
+		return LoadResult{}, err
+	}
+	result := LoadWorkspaceWithProfile(defPath, cfg.ProfileValue())
+	result.ConfigDigest = cfg.Digest()
+	return result, nil
 }
 
 // LoadWorkspace parses a character .def and resolves its [Files] section sources.
@@ -99,6 +115,29 @@ func LoadWorkspaceWithProfile(defPath string, p profile.CompatibilityProfile) Lo
 
 		result.Documents = append(result.Documents, *sourceDoc)
 		result.Diagnostics = append(result.Diagnostics, sourceDoc.Diagnostics...)
+	}
+	// Distribution select entrypoints use the complete startup manifest rather
+	// than only the select file's direct [Files] references.
+	if strings.EqualFold(filepath.Base(cleanDefPath), "select.def") {
+		manifestRoot := filepath.Dir(cleanDefPath)
+		if strings.EqualFold(filepath.Base(manifestRoot), "data") {
+			manifestRoot = filepath.Dir(manifestRoot)
+		}
+		manifest, manifestDiags := resolveStartupManifest(manifestRoot)
+		for _, msg := range manifestDiags {
+			result.Diagnostics = append(result.Diagnostics, makeWorkspaceDiagnostic(cleanDefPath, ir.SourceSpan{}, "startup-manifest", ir.SeverityWarning, msg))
+		}
+		for _, rel := range manifest {
+			resolved := canonicalWorkspacePath(filepath.Join(manifestRoot, filepath.FromSlash(rel)))
+			key := p.DedupKey(resolved)
+			doc, parseErr := parseWorkspaceFile(resolved)
+			if parseErr != nil {
+				continue
+			}
+			seen[key] = struct{}{}
+			result.Documents = append(result.Documents, *doc)
+			result.Diagnostics = append(result.Diagnostics, doc.Diagnostics...)
+		}
 	}
 
 	return result

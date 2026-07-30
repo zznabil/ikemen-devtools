@@ -11,7 +11,7 @@ var zssDependencyRE = regexp.MustCompile(`(?i)^\s*(include|require)\s*(?:=\s*)?(
 // ParseZSS discovers INI-like motif/state sections without interpreting values.
 func ParseZSS(path string, source []byte) *ZSSDocument {
 	s := string(source)
-	doc := &ZSSDocument{Path: path, Source: s}
+	doc := &ZSSDocument{Path: path, Source: s, Completeness: Completeness{Complete: true}}
 	lines := sourceLines(s)
 	for _, line := range lines {
 		trim := strings.TrimSpace(line.text)
@@ -59,6 +59,7 @@ func ParseZSS(path string, source []byte) *ZSSDocument {
 			}
 		}
 	}
+	doc.Completeness.Complete = len(doc.Diagnostics) == 0
 	return doc
 }
 

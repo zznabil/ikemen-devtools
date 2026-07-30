@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ikemen-engine.github.io/ikemen-devtools/schema/catalog-v0.1.json",
+  "title": "ikm v0.1 contract catalog",
+  "version": "0.1.0",
+  "schemas": {
+    "envelope": { "type": "object", "required": ["schemaVersion", "operation", "status", "result", "diagnostics", "page", "truncated"] },
+    "diagnostic": { "type": "object", "required": ["code", "severity", "message"] },
+    "workspaceConfig": { "type": "object", "required": ["version", "root", "profile", "cache", "budgets"] },
+    "capability": { "type": "object", "required": ["name", "description", "authorization", "input", "output", "budget", "pagination", "ordering"] },
+    "graphResult": { "type": "object", "properties": { "nodes": { "type": "array" }, "edges": { "type": "array" }, "truncated": { "type": "boolean" } } },
+    "patchPlan": { "type": "object", "required": ["id", "status", "changes", "approval"] },
+    "mcpTool": { "type": "object", "required": ["name", "description", "inputSchema", "outputSchema"] },
+    "mcpResource": { "type": "object", "required": ["uri", "name"] }
+  }
+}

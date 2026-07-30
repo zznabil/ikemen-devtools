@@ -1,0 +1,118 @@
+name: ikm signed release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+            runner: windows-latest
+            suffix: .exe
+          - goos: linux
+            goarch: amd64
+            runner: ubuntu-latest
+            suffix: ''
+          - goos: darwin
+            goarch: amd64
+            runner: macos-latest
+            suffix: ''
+          - goos: darwin
+            goarch: arm64
+            runner: macos-latest
+            suffix: ''
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Build reproducible binary
+        shell: bash
+        working-directory: .
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -buildvcs=true -ldflags "-s -w -X main.releaseVersion=${VERSION}" -o "dist/ikm-${GOOS}-${GOARCH}${{ matrix.suffix }}" ./cmd/ikm
+          sha256sum "dist/ikm-${GOOS}-${GOARCH}${{ matrix.suffix }}" > "dist/ikm-${GOOS}-${GOARCH}.sha256"
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign checksum manifest
+        working-directory: .
+        run: cosign sign-blob --yes --output-signature dist/ikm-${{ matrix.goos }}-${{ matrix.goarch }}.sha256.sig --output-certificate dist/ikm-${{ matrix.goos }}-${{ matrix.goarch }}.sha256.pem dist/ikm-${{ matrix.goos }}-${{ matrix.goarch }}.sha256
+      - uses: anchore/sbom-action@v0
+        with:
+          path: dist/ikm-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
+          format: spdx-json
+          output-file: dist/ikm-${{ matrix.goos }}-${{ matrix.goarch }}.sbom.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ikm-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+      - uses: actions/attest@v4
+        with:
+          subject-path: dist/ikm-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
+
+  compiled-uat:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ikm-linux-amd64
+          path: dist
+      - name: Execute clean-machine UAT
+        run: |
+          chmod +x dist/ikm-linux-amd64
+          dist/ikm-linux-amd64 version --json
+          dist/ikm-linux-amd64 doctor --json --root .
+          dist/ikm-linux-amd64 capabilities --json
+          dist/ikm-linux-amd64 workspace --root . --json scan
+          printf 'Content-Length: 67\\r\\n\\r\\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}' | dist/ikm-linux-amd64 mcp >/tmp/mcp.json
+          printf 'Content-Length: 67\\r\\n\\r\\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}' | dist/ikm-linux-amd64 lsp >/tmp/lsp.json
+
+  publish:
+    needs: [build, compiled-uat]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Add license notices
+        run: |
+          cp LICENSE dist/LICENSE
+          cp LICENSES.json dist/LICENSES.json
+      - uses: sigstore/cosign-installer@v3
+      - name: Verify signatures
+        run: |
+          set -euxo pipefail
+          for sig in dist/*.sha256.sig; do base="${sig%.sig}"; cert="${base}.pem"; cosign verify-blob --certificate "$cert" --signature "$sig" --certificate-identity-regexp 'https://github.com/.+/.+/.github/workflows/.+' --certificate-oidc-issuer https://token.actions.githubusercontent.com "$base"; done
+      - name: Verify checksums and publish release
+        run: |
+          set -euxo pipefail
+          for f in dist/*.sha256; do (cd dist && sha256sum -c "$(basename "$f")"); done
+          tar -czf ikm-${GITHUB_REF_NAME}.tar.gz -C dist .
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ikm-${{ github.ref_name }}.tar.gz
+            dist/*
+          fail_on_unmatched_files: true

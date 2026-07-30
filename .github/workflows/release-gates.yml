@@ -1,0 +1,22 @@
+name: release gates
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Security and bounded-input gates
+        run: |
+          go test ./internal/workspace ./internal/repository ./internal/contract ./internal/conformance
+          go test -race ./internal/service ./internal/mcp ./internal/repository
+      - name: Benchmark gate (deterministic fixtures)
+        run: go test -run '^$' -bench . ./internal/corpus ./internal/repository
+      - name: Dependency vulnerability gate
+        run: go list -m -json all > /tmp/modules.json

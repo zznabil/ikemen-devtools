@@ -1,6 +1,7 @@
 package trace
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -79,3 +80,12 @@ type fakeRunner struct {
 }
 
 func (f fakeRunner) Run(context.Context, Config) (RawResult, error) { return f.result, f.err }
+func TestLimitedWriterConsumesDroppedOutputWithoutShortWrite(t *testing.T) {
+	var captured bytes.Buffer
+	writer := limitedWriter{w: &captured, n: 4}
+	input := []byte("0123456789")
+	n, err := writer.Write(input)
+	if err != nil || n != len(input) || captured.String() != "0123" {
+		t.Fatalf("n=%d err=%v captured=%q", n, err, captured.String())
+	}
+}

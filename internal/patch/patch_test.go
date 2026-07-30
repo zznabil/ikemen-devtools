@@ -1,6 +1,7 @@
 package patch
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -78,5 +79,42 @@ func TestPreviewRejectsTraversal(t *testing.T) {
 	root := t.TempDir()
 	if _, err := PreviewPatch(root, Patch{Edits: []Edit{{Path: "../outside", Span: Span{ByteStart: 0, ByteEnd: 0}}}}); !errors.Is(err, ErrPathEscape) {
 		t.Fatalf("expected traversal rejection, got %v", err)
+	}
+}
+
+func TestApplyAtomicCommitsAllFiles(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"a.def", "b.def"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("old"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	edits := []Edit{editFor(t, root, "a.def", 0, 3, "old", "new"), editFor(t, root, "b.def", 0, 3, "old", "new")}
+	if _, err := ApplyAtomic(root, Patch{Edits: edits}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"a.def", "b.def"} {
+		b, _ := os.ReadFile(filepath.Join(root, name))
+		if string(b) != "new" {
+			t.Fatalf("%s not replaced", name)
+		}
+	}
+}
+
+func TestRecoverJournalRestoresBackup(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "a.def")
+	backup := target + ".ikm-backup"
+	os.WriteFile(backup, []byte("old"), 0644)
+	os.WriteFile(target, []byte("new"), 0644)
+	j := Journal{Phase: "replacing", Root: root, Backups: []string{backup}}
+	b, _ := json.Marshal(j)
+	os.WriteFile(journalPath(root), b, 0600)
+	if err := Recover(root); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(target)
+	if string(got) != "old" {
+		t.Fatalf("recovery failed: %q", got)
 	}
 }

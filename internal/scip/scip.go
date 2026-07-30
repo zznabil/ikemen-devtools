@@ -143,7 +143,9 @@ func buildDocuments(input []ir.Document) []documentRecord {
 }
 
 func canonicalPath(path string) string {
-	p := filepath.ToSlash(filepath.Clean(strings.TrimSpace(path)))
+	p := strings.TrimSpace(path)
+	p = strings.ReplaceAll(p, "\\", "/")
+	p = filepath.ToSlash(filepath.Clean(p))
 	return strings.TrimPrefix(p, "./")
 }
 func firstSymbolID(d ir.Document) string {

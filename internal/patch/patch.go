@@ -3,6 +3,7 @@ package patch
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -248,4 +249,179 @@ func resolvePath(root, rel string) (string, error) {
 		return "", ErrPathEscape
 	}
 	return candidate, nil
+}
+
+// PlanVersion identifies the serialized mutation contract.
+const PlanVersion = "1"
+
+type PatchPlan struct {
+	Version           string   `json:"version"`
+	OperationID       string   `json:"operationId"`
+	WorkspaceRoot     string   `json:"workspaceRoot"`
+	WorkspaceIdentity string   `json:"workspaceIdentity"`
+	Profile           string   `json:"profile,omitempty"`
+	InputSnapshot     string   `json:"inputSnapshot"`
+	Edits             []Edit   `json:"edits"`
+	Postconditions    []string `json:"postconditions,omitempty"`
+}
+type TransactionError struct {
+	Phase string
+	Err   error
+}
+
+func (e *TransactionError) Error() string {
+	return "patch transaction " + e.Phase + ": " + e.Err.Error()
+}
+func (e *TransactionError) Unwrap() error { return e.Err }
+
+// ApplyAtomic stages all files and retains backups until every replacement succeeds.
+func ApplyAtomic(root string, p Patch) (ApplyResult, error) {
+	preview, err := prepare(root, p)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	type backup struct {
+		path, temp string
+		mode       os.FileMode
+	}
+	backups := make([]backup, 0, len(preview.Files))
+	journal := Journal{Phase: "staging", Root: root}
+	writeJournal := func() error { b, _ := json.Marshal(journal); return os.WriteFile(journalPath(root), b, 0600) }
+	if err := writeJournal(); err != nil {
+		return ApplyResult{}, &TransactionError{"journal", err}
+	}
+	rollback := func() {
+		for _, b := range backups {
+			_ = os.Remove(b.path)
+			_ = os.Rename(b.temp, b.path)
+		}
+	}
+	for _, f := range preview.Files {
+		path, e := resolvePath(root, f.Path)
+		if e != nil {
+			rollback()
+			return ApplyResult{}, &TransactionError{"validate", e}
+		}
+		info, e := os.Stat(path)
+		if e != nil {
+			rollback()
+			return ApplyResult{}, &TransactionError{"validate", e}
+		}
+		tmp, e := os.CreateTemp(filepath.Dir(path), ".ikm-patch-*")
+		if e != nil {
+			rollback()
+			return ApplyResult{}, &TransactionError{"stage", e}
+		}
+		name := tmp.Name()
+		if _, e = tmp.Write(f.Bytes); e == nil {
+			e = tmp.Sync()
+		}
+		if ce := tmp.Close(); e == nil {
+			e = ce
+		}
+		if e != nil {
+			_ = os.Remove(name)
+			rollback()
+			return ApplyResult{}, &TransactionError{"stage", e}
+		}
+		if e = os.Chmod(name, info.Mode()); e != nil {
+			_ = os.Remove(name)
+			rollback()
+			return ApplyResult{}, &TransactionError{"stage", e}
+		}
+		backupPath := path + ".ikm-backup"
+		_ = os.Remove(backupPath)
+		if e = os.Rename(path, backupPath); e != nil {
+			_ = os.Remove(name)
+			rollback()
+			return ApplyResult{}, &TransactionError{"backup", e}
+		}
+		backups = append(backups, backup{path: path, temp: backupPath, mode: info.Mode()})
+		journal.Phase = "replacing"
+		journal.Backups = append(journal.Backups, backupPath)
+		if e = writeJournal(); e != nil {
+			rollback()
+			return ApplyResult{}, &TransactionError{"journal", e}
+		}
+		if e = os.Rename(name, path); e != nil {
+			rollback()
+			return ApplyResult{}, &TransactionError{"replace", e}
+		}
+	}
+	for _, b := range backups {
+		_ = os.Remove(b.temp)
+	}
+	_ = os.Remove(journalPath(root))
+	return ApplyResult{Files: preview.Files}, nil
+}
+
+func (p PatchPlan) JSON() ([]byte, error) {
+	if p.Version == "" {
+		p.Version = PlanVersion
+	}
+	sort.SliceStable(p.Edits, func(i, j int) bool {
+		if p.Edits[i].Path != p.Edits[j].Path {
+			return p.Edits[i].Path < p.Edits[j].Path
+		}
+		return p.Edits[i].Span.ByteStart < p.Edits[j].Span.ByteStart
+	})
+	return json.Marshal(p)
+}
+func UnifiedDiff(root string, preview PreviewResult) string {
+	var b strings.Builder
+	for _, f := range preview.Files {
+		fmt.Fprintf(&b, "--- a/%s\n+++ b/%s\n@@\n", f.Path, f.Path)
+		old, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(f.Path)))
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(&b, "-%s\n+%s\n", strings.TrimSuffix(string(old), "\n"), strings.TrimSuffix(string(f.Bytes), "\n"))
+	}
+	return b.String()
+}
+
+func (p PatchPlan) Validate() error {
+	if p.Version == "" || p.Version != PlanVersion {
+		return errors.New("patch: unsupported plan version")
+	}
+	if strings.TrimSpace(p.InputSnapshot) == "" {
+		return errors.New("patch: missing input snapshot")
+	}
+	if len(p.Edits) == 0 {
+		return errors.New("patch: plan has no edits")
+	}
+	for _, e := range p.Edits {
+		if e.ContentHash == "" || e.IdentityContract == "" || e.Span.ByteStart < 0 || e.Span.ByteEnd < e.Span.ByteStart {
+			return errors.New("patch: edit lacks hash, identity, or valid span")
+		}
+	}
+	return nil
+}
+
+type Journal struct {
+	Phase   string   `json:"phase"`
+	Root    string   `json:"root"`
+	Backups []string `json:"backups"`
+}
+
+func journalPath(root string) string { return filepath.Join(root, ".ikm-patch-journal.json") }
+func Recover(root string) error {
+	b, e := os.ReadFile(journalPath(root))
+	if e != nil {
+		return e
+	}
+	var j Journal
+	if e = json.Unmarshal(b, &j); e != nil {
+		return e
+	}
+	for _, backup := range j.Backups {
+		target := strings.TrimSuffix(backup, ".ikm-backup")
+		if _, e = os.Stat(backup); e == nil {
+			_ = os.Remove(target)
+			if e = os.Rename(backup, target); e != nil {
+				return e
+			}
+		}
+	}
+	return os.Remove(journalPath(root))
 }

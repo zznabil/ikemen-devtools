@@ -12,7 +12,7 @@ var luaDependencyRE = regexp.MustCompile(`(?i)\b(require|include)\s*\(\s*["']([^
 // ParseLua discovers functions and static require/include calls without execution.
 func ParseLua(path string, source []byte) *LuaDocument {
 	s := string(source)
-	doc := &LuaDocument{Path: path, Source: s}
+	doc := &LuaDocument{Path: path, Source: s, Completeness: Completeness{Complete: true}}
 	lines := sourceLines(s)
 	type openFn struct {
 		name        string
@@ -60,6 +60,7 @@ func ParseLua(path string, source []byte) *LuaDocument {
 	for _, top := range stack {
 		doc.Diagnostics = append(doc.Diagnostics, Diagnostic{Code: "lua.unterminated-function", Message: "function is missing a matching end", Span: spanAt(top.line, top.headerStart, len(top.line.text)-top.headerStart)})
 	}
+	doc.Completeness.Complete = len(doc.Diagnostics) == 0
 	return doc
 }
 func luaBlockEnd(text string) bool {
