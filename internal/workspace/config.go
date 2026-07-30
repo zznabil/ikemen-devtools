@@ -131,6 +131,9 @@ func ResolveConfig(root string, flags ConfigFlags) (WorkspaceConfig, error) {
 	} else if !os.IsNotExist(readErr) {
 		return WorkspaceConfig{}, &ConfigError{Code: "read", Err: readErr}
 	}
+	if len(cfg.EntryPoints) == 0 {
+		cfg.EntryPoints = deriveGameEntryPoints(abs)
+	}
 	if flags.Profile != "" {
 		cfg.Profile = flags.Profile
 	}
@@ -160,7 +163,35 @@ func ResolveConfig(root string, flags ConfigFlags) (WorkspaceConfig, error) {
 	if err := validateConfig(cfg); err != nil {
 		return WorkspaceConfig{}, err
 	}
+
 	return normalizeConfig(cfg), nil
+}
+
+func deriveGameEntryPoints(root string) []string {
+	data, err := os.ReadFile(filepath.Join(root, "save", "config.json"))
+	if err != nil {
+		return []string{}
+	}
+	var raw struct {
+		Motif      string `json:"Motif"`
+		System     string `json:"System"`
+		StartStage string `json:"StartStage"`
+	}
+	if json.Unmarshal(data, &raw) != nil {
+		return []string{}
+	}
+	out := []string{"data/select.def"}
+	for _, p := range []string{raw.Motif, raw.System, raw.StartStage} {
+		p = filepath.ToSlash(strings.TrimSpace(p))
+		if p == "" {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(p))); err == nil {
+			out = append(out, p)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // LoadConfig is the explicit-root entry point for workspace configuration.
